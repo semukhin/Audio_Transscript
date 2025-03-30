@@ -1,12 +1,14 @@
+# Внесите следующие изменения в начало app.py:
+
 import os
 import json
 import tempfile
 import uuid
 import time
 import datetime
-from pydub import AudioSegment
 import threading
-from flask import Flask, render_template, request, jsonify, send_file
+import re
+from flask import Flask, render_template, request, jsonify, send_file, url_for
 from werkzeug.utils import secure_filename
 from google.cloud import speech
 from google.cloud.speech import RecognitionConfig
@@ -17,24 +19,40 @@ import docx
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import traceback
+from config import config as app_config
+import magic
+from langdetect import detect, LangDetectException
+
+# Определение конфигурации в зависимости от окружения
+config_name = os.environ.get('FLASK_CONFIG', 'default')
+config = app_config[config_name]
 
 # Инициализация Flask приложения
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 МБ максимальный размер файла
-app.config['CREDENTIALS_PATH'] = '/home/semukhin/Documents/GitHub/Audio_Transscript/lawgpt2025-4a4960627584.json'
+app.config.from_object(config)
+app.config['SECRET_KEY'] = config.SECRET_KEY
+app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = config.MAX_CONTENT_LENGTH
+app.config['CREDENTIALS_PATH'] = config.CREDENTIALS_PATH
+app.config['SESSION_EXPIRY'] = config.SESSION_EXPIRY
 
 # Создание папки для загрузок, если её нет
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(os.path.join(tempfile.gettempdir(), 'transcripts'), exist_ok=True)
 
 # Разрешенные расширения файлов
-ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac'}
+ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'webm'}
 
-# Словарь для хранения статусов задач
+# Словарь для хранения статусов задач и сессий
 task_status = {}
+sessions = {}
 
 def generate_task_id():
     """Генерация уникального ID задачи"""
+    return str(uuid.uuid4())
+
+def generate_session_id():
+    """Генерация уникального ID сессии"""
     return str(uuid.uuid4())
 
 def allowed_file(filename):
@@ -53,6 +71,16 @@ def format_time(seconds):
     minutes = int(seconds) // 60
     seconds = int(seconds) % 60
     return f"{minutes:02d}:{seconds:02d}"
+
+def get_audio_sample_rate(file_path):
+    """Определение частоты дискретизации аудиофайла"""
+    try:
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(file_path)
+        return audio.frame_rate
+    except Exception as e:
+        print(f"Ошибка при определении частоты дискретизации: {e}")
+        return None  # Вернем None и позволим API определить частоту самостоятельно
 
 def prepare_audio_for_transcription(file_path, status_callback=None):
     """Подготовка аудиофайла для транскрипции: конвертация в подходящий формат"""
@@ -83,12 +111,16 @@ def prepare_audio_for_transcription(file_path, status_callback=None):
                     audio = AudioSegment.from_ogg(file_path)
                 elif file_ext == '.flac':
                     audio = AudioSegment.from_file(file_path, format="flac")
+                elif file_ext == '.webm':
+                    audio = AudioSegment.from_file(file_path, format="webm")
+                elif file_ext == '.opus':
+                    audio = AudioSegment.from_file(file_path, format="opus")
                 else:
                     audio = AudioSegment.from_file(file_path)
                 
-                # Конвертируем в WAV с параметрами, подходящими для Google Speech-to-Text
-                audio = audio.set_frame_rate(16000)
-                audio = audio.set_channels(1)
+                # Сохраняем оригинальную частоту дискретизации
+                # вместо принудительной установки 16000
+                audio = audio.set_channels(1)  # 1 канал (моно)
                 audio = audio.set_sample_width(2)  # 16 bit
                 
                 # Сохраняем в WAV
@@ -145,6 +177,46 @@ def check_audio_for_speech(file_path, status_callback=None):
     except ImportError:
         # Если pydub не установлен
         return True, "Предупреждение: библиотека pydub не установлена. Проверка аудио недоступна."
+
+def detect_speaker_names(transcript):
+    """
+    Попытка определить имена говорящих из контекста разговора
+    Это упрощенная версия - в реальной системе нужен более сложный алгоритм NLP
+    """
+    if isinstance(transcript, list):
+        # Ищем имена в формате "Имя:"
+        name_pattern = re.compile(r'([А-Я][а-я]+):', re.UNICODE)
+        potential_names = set()
+        
+        for segment in transcript:
+            if 'text' in segment:
+                matches = name_pattern.findall(segment['text'])
+                for match in matches:
+                    if len(match) > 2:  # Фильтруем слишком короткие "имена"
+                        potential_names.add(match)
+        
+        # Если нашли имена, заменяем "Говорящий X" на имена
+        if potential_names:
+            names_list = list(potential_names)
+            speaker_map = {}
+            
+            # Создаем соответствие "Говорящий X" -> "Имя"
+            for i, segment in enumerate(transcript):
+                if 'speaker' in segment and segment['speaker'].startswith('Говорящий '):
+                    speaker_num = segment['speaker'].split(' ')[1]
+                    if speaker_num.isdigit():
+                        idx = int(speaker_num) - 1
+                        if idx < len(names_list) and speaker_num not in speaker_map:
+                            speaker_map[speaker_num] = names_list[idx]
+            
+            # Заменяем имена говорящих
+            for segment in transcript:
+                if 'speaker' in segment and segment['speaker'].startswith('Говорящий '):
+                    speaker_num = segment['speaker'].split(' ')[1]
+                    if speaker_num in speaker_map:
+                        segment['speaker'] = speaker_map[speaker_num]
+    
+    return transcript
 
 def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None):
     """Транскрибирование аудиофайла с помощью Google Speech-to-Text API."""
@@ -216,11 +288,15 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
         audio = speech.RecognitionAudio(content=content)
         update_status(40, "Файл подготовлен для отправки в API")
     
+    # Определение частоты дискретизации аудио
+    sample_rate = get_audio_sample_rate(prepared_file_path)
+    
     # Базовая конфигурация
     update_status(45, "Настройка параметров распознавания")
     config = speech.RecognitionConfig(
         encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=16000,
+        # Используем определенную частоту или оставляем None, чтобы API определил самостоятельно
+        sample_rate_hertz=sample_rate if sample_rate else None,
         language_code=language_code,
         enable_automatic_punctuation=True,
         audio_channel_count=1,
@@ -408,6 +484,9 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
                     transcript += res.alternatives[0].transcript + " "
                 return transcript.strip()
             
+            # Попытка определить имена говорящих из контекста
+            result = detect_speaker_names(result)
+            
             return result
         else:
             # Обычная транскрипция без таймингов
@@ -430,7 +509,7 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
         return f"Ошибка при транскрибировании: {str(e)}"
     finally:
         # Используем Cloud Storage, НЕ удаляем файл
-        if file_size > 10 * 1024 * 1024:
+        if file_size > 10 * 1024 * 1024 and 'gcs_uri' in locals():
             update_status(100, f"Аудиофайл сохранен в Cloud Storage: {gcs_uri}")
         
         # Удаляем временный конвертированный файл, если он создавался
@@ -440,10 +519,40 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
             except Exception as e:
                 print(f"Не удалось удалить временный файл: {e}")
 
+def get_video_info(url):
+    """Получение информации о видео по ссылке"""
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'geo_bypass': True,
+        'nocheckcertificate': True,
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return {
+                'title': info.get('title', 'Неизвестное видео'),
+                'uploader': info.get('uploader', 'Неизвестный автор'),
+                'duration': info.get('duration', 0),
+                'upload_date': info.get('upload_date', ''),
+                'thumbnail': info.get('thumbnail', '')
+            }
+    except Exception as e:
+        print(f"Ошибка при получении информации о видео: {e}")
+        return None
+
 def download_from_youtube(url, status_callback=None):
     """Загрузка аудио из YouTube-видео."""
     if status_callback:
         status_callback(10, "Подготовка к загрузке видео...")
+    
+    # Получаем информацию о видео
+    video_info = get_video_info(url)
+    if video_info:
+        if status_callback:
+            status_callback(12, f"Найдено видео: {video_info['title']}")
     
     temp_dir = tempfile.gettempdir()
     output_file = os.path.join(temp_dir, f"{uuid.uuid4()}.%(ext)s")
@@ -456,6 +565,10 @@ def download_from_youtube(url, status_callback=None):
             'preferredcodec': 'wav',
             'preferredquality': '192',
         }],
+        'quiet': False,
+        'no_warnings': False,
+        'geo_bypass': True,
+        'nocheckcertificate': True,
         'progress_hooks': [lambda d: status_callback(
             min(10 + int(d['downloaded_percent'] * 0.3), 40), 
             f"Загрузка видео: {d['downloaded_percent']:.1f}%"
@@ -473,15 +586,15 @@ def download_from_youtube(url, status_callback=None):
             if status_callback:
                 status_callback(40, "Видео загружено и преобразовано в аудио")
             
-            return downloaded_file
+            return downloaded_file, video_info
     except Exception as e:
         print(f"Ошибка при загрузке видео: {e}")
         traceback.print_exc()
         if status_callback:
             status_callback(0, f"Ошибка при загрузке видео: {str(e)}")
-        return None
+        return None, None
 
-def create_docx(transcript, filename="transcript", with_timestamps=False):
+def create_docx(transcript, filename="transcript", with_timestamps=False, video_info=None):
     """Создание DOCX файла с транскрипцией."""
     doc = docx.Document()
     
@@ -490,9 +603,25 @@ def create_docx(transcript, filename="transcript", with_timestamps=False):
     title_paragraph = title.paragraph_format
     title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
+    # Добавление информации о видео, если она есть
+    if video_info:
+        video_paragraph = doc.add_paragraph()
+        video_paragraph.add_run("Информация о видео:\n").bold = True
+        video_paragraph.add_run(f"Название: {video_info['title']}\n")
+        video_paragraph.add_run(f"Автор: {video_info['uploader']}\n")
+        
+        if video_info['duration']:
+            minutes, seconds = divmod(video_info['duration'], 60)
+            video_paragraph.add_run(f"Длительность: {minutes}:{seconds:02d}\n")
+        
+        if video_info['upload_date']:
+            upload_date = video_info['upload_date']
+            formatted_date = f"{upload_date[6:8]}.{upload_date[4:6]}.{upload_date[0:4]}"
+            video_paragraph.add_run(f"Дата публикации: {formatted_date}\n")
+    
     # Добавление даты и времени
     date_paragraph = doc.add_paragraph()
-    date_run = date_paragraph.add_run(f"Дата: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    date_run = date_paragraph.add_run(f"Дата транскрипции: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     date_run.font.size = Pt(10)
     date_run.font.italic = True
     date_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -537,14 +666,55 @@ def create_docx(transcript, filename="transcript", with_timestamps=False):
     footer_run.font.italic = True
     
     # Сохранение во временный файл
-    temp_file = os.path.join(tempfile.gettempdir(), f"{filename}.docx")
+    temp_file = os.path.join(tempfile.gettempdir(), 'transcripts', f"{filename}.docx")
     doc.save(temp_file)
     
     return temp_file
 
+def save_transcript_to_session(session_id, transcript, docx_path, with_timestamps=False, video_info=None):
+    """Сохранение транскрипции в сессию"""
+    # Формируем уникальный URL для доступа к сессии
+    share_url = f"/share/{session_id}"
+    
+    sessions[session_id] = {
+        'created_at': datetime.datetime.now().timestamp(),
+        'transcript': transcript,
+        'docx_path': docx_path,
+        'with_timestamps': with_timestamps,
+        'video_info': video_info,
+        'share_url': share_url
+    }
+    
+    # Очистка старых сессий (старше 24 часов)
+    current_time = datetime.datetime.now().timestamp()
+    sessions_to_delete = []
+    
+    for s_id, s_data in sessions.items():
+        if current_time - s_data['created_at'] > app.config['SESSION_EXPIRY']:
+            sessions_to_delete.append(s_id)
+    
+    for s_id in sessions_to_delete:
+        del sessions[s_id]
+    
+    return share_url
+
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/share/<session_id>')
+def shared_transcript(session_id):
+    """Страница с доступом к сохраненной транскрипции"""
+    if session_id in sessions:
+        session_data = sessions[session_id]
+        return render_template(
+            'shared.html',
+            transcript=session_data['transcript'],
+            with_timestamps=session_data['with_timestamps'],
+            video_info=session_data['video_info'],
+            docx_path=session_data['docx_path']
+        )
+    return render_template('error.html', message="Сессия не найдена или истекла")
 
 @app.route('/task_status/<task_id>', methods=['GET'])
 def get_task_status(task_id):
@@ -570,8 +740,14 @@ def process_audio_file(file_path, enable_timestamps, task_id):
         # Запускаем транскрибирование
         transcript = transcribe_audio(file_path, enable_timestamps=enable_timestamps, status_callback=update_status)
         
+        # Генерируем ID сессии
+        session_id = generate_session_id()
+        
         # Создание DOCX файла
         docx_path = create_docx(transcript, os.path.splitext(os.path.basename(file_path))[0], with_timestamps=enable_timestamps)
+        
+        # Сохраняем транскрипцию в сессию
+        share_url = save_transcript_to_session(session_id, transcript, os.path.basename(docx_path), enable_timestamps)
         
         # Финальное обновление статуса
         task_status[task_id] = {
@@ -580,7 +756,9 @@ def process_audio_file(file_path, enable_timestamps, task_id):
             'message': 'Транскрипция завершена',
             'transcript': transcript,
             'docx_path': os.path.basename(docx_path),
-            'with_timestamps': enable_timestamps
+            'with_timestamps': enable_timestamps,
+            'session_id': session_id,
+            'share_url': share_url
         }
     except Exception as e:
         print(f"Ошибка при обработке файла: {e}")
@@ -607,7 +785,7 @@ def process_youtube_link(url, enable_timestamps, task_id):
         update_status(5, "Начало обработки ссылки")
         
         # Загрузка аудио из видео
-        audio_path = download_from_youtube(url, update_status)
+        audio_path, video_info = download_from_youtube(url, update_status)
         
         if not audio_path:
             task_status[task_id] = {
@@ -620,8 +798,14 @@ def process_youtube_link(url, enable_timestamps, task_id):
         # Запускаем транскрибирование
         transcript = transcribe_audio(audio_path, enable_timestamps=enable_timestamps, status_callback=update_status)
         
+        # Генерируем ID сессии
+        session_id = generate_session_id()
+        
         # Создание DOCX файла
-        docx_path = create_docx(transcript, f"link_{uuid.uuid4()}", with_timestamps=enable_timestamps)
+        docx_path = create_docx(transcript, f"link_{uuid.uuid4()}", with_timestamps=enable_timestamps, video_info=video_info)
+        
+        # Сохраняем транскрипцию в сессию
+        share_url = save_transcript_to_session(session_id, transcript, os.path.basename(docx_path), enable_timestamps, video_info)
         
         # Удаление временного файла
         try:
@@ -636,7 +820,10 @@ def process_youtube_link(url, enable_timestamps, task_id):
             'message': 'Транскрипция завершена',
             'transcript': transcript,
             'docx_path': os.path.basename(docx_path),
-            'with_timestamps': enable_timestamps
+            'with_timestamps': enable_timestamps,
+            'video_info': video_info,
+            'session_id': session_id,
+            'share_url': share_url
         }
     except Exception as e:
         print(f"Ошибка при обработке ссылки: {e}")
@@ -662,7 +849,7 @@ def upload_file():
     
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{uuid.uuid4()}_{filename}")
         file.save(file_path)
         
         # Создаем ID задачи
@@ -751,7 +938,7 @@ def process_link():
 @app.route('/download/<filename>', methods=['GET'])
 def download_file(filename):
     """Скачивание DOCX файла с транскрипцией."""
-    file_path = os.path.join(tempfile.gettempdir(), filename)
+    file_path = os.path.join(tempfile.gettempdir(), 'transcripts', filename)
     
     if not os.path.exists(file_path):
         return jsonify({'error': 'Файл не найден'}), 404
@@ -761,6 +948,155 @@ def download_file(filename):
         as_attachment=True,
         download_name=filename
     )
+
+@app.route('/api/verify_link', methods=['POST'])
+def verify_link():
+    """API для проверки ссылки на возможность загрузки"""
+    data = request.json
+    
+    if not data or 'url' not in data:
+        return jsonify({'error': 'URL не найден в запросе'}), 400
+    
+    url = data['url']
+    
+    try:
+        video_info = get_video_info(url)
+        if video_info:
+            return jsonify({
+                'status': 'success',
+                'video_info': video_info
+            })
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'Не удалось получить информацию о видео'
+            })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Ошибка при проверке ссылки: {str(e)}'
+        })
+
+# Добавьте в конец файла app.py перед if __name__ == '__main__':
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze_transcript():
+    """API для анализа транскрипции"""
+    data = request.json
+    
+    if not data or 'transcript' not in data:
+        return jsonify({'error': 'Транскрипция не найдена в запросе'}), 400
+    
+    transcript = data['transcript']
+    with_timestamps = data.get('with_timestamps', False)
+    
+    try:
+        # Анализ текста
+        result = {}
+        
+        if with_timestamps and isinstance(transcript, list):
+            # Статистика по говорящим
+            speakers = {}
+            word_frequencies = {}
+            sentence_lengths = []
+            total_words = 0
+            
+            for segment in transcript:
+                speaker = segment['speaker']
+                text = segment['text']
+                
+                # Разбиваем текст на слова
+                words = re.findall(r'\b[а-яА-Яa-zA-Z]+\b', text.lower())
+                sentences = re.split(r'[.!?]+', text)
+                
+                # Подсчет для говорящего
+                if speaker not in speakers:
+                    speakers[speaker] = {
+                        'word_count': 0,
+                        'sentence_count': 0,
+                        'total_time': 0,
+                        'avg_words_per_sentence': 0
+                    }
+                
+                speakers[speaker]['word_count'] += len(words)
+                speakers[speaker]['sentence_count'] += len(sentences)
+                
+                # Подсчет общей частоты слов
+                for word in words:
+                    if len(word) > 2:  # Игнорируем слишком короткие слова
+                        word_frequencies[word] = word_frequencies.get(word, 0) + 1
+                
+                # Длина предложений
+                for sentence in sentences:
+                    if sentence.strip():
+                        words_in_sentence = len(re.findall(r'\b[а-яА-Яa-zA-Z]+\b', sentence.lower()))
+                        if words_in_sentence > 0:
+                            sentence_lengths.append(words_in_sentence)
+                
+                total_words += len(words)
+            
+            # Расчет средних значений
+            for speaker, stats in speakers.items():
+                if stats['sentence_count'] > 0:
+                    stats['avg_words_per_sentence'] = stats['word_count'] / stats['sentence_count']
+            
+            # Сортируем частоты слов
+            sorted_words = sorted(word_frequencies.items(), key=lambda x: x[1], reverse=True)
+            top_words = sorted_words[:50]
+            
+            # Формируем результат
+            result = {
+                'speakers': speakers,
+                'top_words': dict(top_words),
+                'total_words': total_words,
+                'avg_sentence_length': sum(sentence_lengths) / len(sentence_lengths) if sentence_lengths else 0,
+                'sentence_count': len(sentence_lengths),
+                'word_variety': len(word_frequencies) / total_words if total_words > 0 else 0
+            }
+        else:
+            # Анализ для обычного текста без таймингов
+            words = re.findall(r'\b[а-яА-Яa-zA-Z]+\b', transcript.lower())
+            sentences = re.split(r'[.!?]+', transcript)
+            
+            # Подсчет частоты слов
+            word_frequencies = {}
+            for word in words:
+                if len(word) > 2:
+                    word_frequencies[word] = word_frequencies.get(word, 0) + 1
+            
+            # Сортируем частоты слов
+            sorted_words = sorted(word_frequencies.items(), key=lambda x: x[1], reverse=True)
+            top_words = sorted_words[:50]
+            
+            # Длина предложений
+            sentence_lengths = []
+            for sentence in sentences:
+                if sentence.strip():
+                    words_in_sentence = len(re.findall(r'\b[а-яА-Яa-zA-Z]+\b', sentence.lower()))
+                    if words_in_sentence > 0:
+                        sentence_lengths.append(words_in_sentence)
+            
+            # Формируем результат
+            result = {
+                'top_words': dict(top_words),
+                'total_words': len(words),
+                'avg_sentence_length': sum(sentence_lengths) / len(sentence_lengths) if sentence_lengths else 0,
+                'sentence_count': len(sentence_lengths),
+                'word_variety': len(word_frequencies) / len(words) if words else 0
+            }
+        
+        return jsonify({
+            'status': 'success',
+            'analysis': result
+        })
+    except Exception as e:
+        print(f"Ошибка при анализе транскрипции: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'status': 'error',
+            'message': f'Ошибка при анализе: {str(e)}'
+        }), 500
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

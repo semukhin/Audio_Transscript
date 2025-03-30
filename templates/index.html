@@ -8,11 +8,16 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
-<body>
+<body class="light-mode">
     <div class="container">
         <header>
             <div class="logo">
                 <img src="{{ url_for('static', filename='img/logo.svg') }}" alt="Логотип">
+            </div>
+            <div class="header-controls">
+                <button id="theme-toggle" class="theme-toggle">
+                    <i class="fas fa-moon"></i>
+                </button>
             </div>
             <h1>Транскрипция аудио в текст</h1>
             <p class="subtitle">Профессиональное преобразование аудио в текст с поддержкой таймингов речи</p>
@@ -20,9 +25,15 @@
         
         <div class="tabs">
             <div class="tab-buttons">
-                <button class="tab-button active" data-tab="upload">Загрузить файл</button>
-                <button class="tab-button" data-tab="record">Записать аудио</button>
-                <button class="tab-button" data-tab="link">По ссылке</button>
+                <button class="tab-button active" data-tab="upload">
+                    <i class="fas fa-file-audio"></i> Загрузить файл
+                </button>
+                <button class="tab-button" data-tab="record">
+                    <i class="fas fa-microphone"></i> Записать аудио
+                </button>
+                <button class="tab-button" data-tab="link">
+                    <i class="fas fa-link"></i> По ссылке
+                </button>
             </div>
             
             <div class="tab-content">
@@ -31,15 +42,15 @@
                     <div class="upload-area" id="drop-area">
                         <i class="fas fa-cloud-upload-alt"></i>
                         <p>Перетащите аудиофайл сюда или выберите файл</p>
-                        <p class="small-text">Поддерживаются форматы WAV, MP3, OGG, FLAC, M4A, AAC до 100 МБ</p>
-                        <input type="file" id="file-input" accept=".wav,.mp3,.ogg,.flac,.m4a,.aac" hidden>
+                        <p class="small-text">Поддерживаются форматы WAV, MP3, OGG, FLAC, M4A, AAC, WEBM, OPUS до 100 МБ</p>
+                        <input type="file" id="file-input" accept=".wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.opus" hidden>
                         <button class="btn primary" id="browse-button">Выбрать файл</button>
                     </div>
                     <div class="file-info" id="file-info" style="display: none;">
                         <p>Выбранный файл: <span id="file-name"></span></p>
                         <div class="checkbox-container">
-                            <input type="checkbox" id="timestamps-checkbox" class="custom-checkbox">
-                            <label for="timestamps-checkbox">Добавить тайминги речи участников диалога</label>
+                            <input type="checkbox" id="timestamps-checkbox" class="custom-checkbox" checked>
+                            <label for="timestamps-checkbox">Определить участников диалога и добавить тайминги речи</label>
                         </div>
                         <button class="btn primary" id="upload-button">Транскрибировать</button>
                     </div>
@@ -58,15 +69,18 @@
                         </div>
                         <div class="record-status">
                             <div class="timer" id="record-timer">00:00</div>
-                            <div class="visualizer">
-                                <canvas id="visualizer" height="60"></canvas>
+                            <div class="visualizer-container">
+                                <canvas id="visualizer" width="500" height="60"></canvas>
+                                <div class="level-indicator">
+                                    <div class="level-bar" id="level-bar"></div>
+                                </div>
                             </div>
                         </div>
                         <div class="record-preview" id="record-preview" style="display: none;">
                             <audio id="audio-preview" controls></audio>
                             <div class="checkbox-container">
-                                <input type="checkbox" id="record-timestamps-checkbox" class="custom-checkbox">
-                                <label for="record-timestamps-checkbox">Добавить тайминги речи участников диалога</label>
+                                <input type="checkbox" id="record-timestamps-checkbox" class="custom-checkbox" checked>
+                                <label for="record-timestamps-checkbox">Определить участников диалога и добавить тайминги речи</label>
                             </div>
                             <button class="btn primary" id="transcribe-record">Транскрибировать</button>
                         </div>
@@ -76,13 +90,26 @@
                 <!-- Вкладка по ссылке -->
                 <div class="tab-pane" id="link">
                     <div class="link-area">
-                        <p>Введите ссылку на YouTube видео или другой источник медиа</p>
+                        <p>Введите ссылку на YouTube, VK, Rutube или другой видеохостинг</p>
                         <div class="input-group">
                             <input type="text" id="video-link" placeholder="https://www.youtube.com/watch?v=...">
+                            <button class="btn verify-btn" id="verify-link">
+                                <i class="fas fa-check"></i>
+                            </button>
+                        </div>
+                        <div id="video-preview" class="video-preview" style="display: none;">
+                            <div class="video-info">
+                                <img id="video-thumbnail" src="" alt="Превью видео">
+                                <div class="video-details">
+                                    <h3 id="video-title">Название видео</h3>
+                                    <p id="video-author">Автор: <span></span></p>
+                                    <p id="video-duration">Длительность: <span></span></p>
+                                </div>
+                            </div>
                         </div>
                         <div class="checkbox-container" style="margin-top: 15px;">
-                            <input type="checkbox" id="link-timestamps-checkbox" class="custom-checkbox">
-                            <label for="link-timestamps-checkbox">Добавить тайминги речи участников диалога</label>
+                            <input type="checkbox" id="link-timestamps-checkbox" class="custom-checkbox" checked>
+                            <label for="link-timestamps-checkbox">Определить участников диалога и добавить тайминги речи</label>
                         </div>
                         <button class="btn primary" id="transcribe-link" style="margin-top: 15px;">Транскрибировать</button>
                     </div>
@@ -93,14 +120,59 @@
         <!-- Прогресс и результаты -->
         <div class="progress-container" id="progress-container" style="display: none;">
             <h3>Обработка...</h3>
+            <div class="progress-steps" id="progress-steps">
+                <div class="step active" data-step="prepare">
+                    <div class="step-icon"><i class="fas fa-file-audio"></i></div>
+                    <div class="step-text">Подготовка</div>
+                </div>
+                <div class="step" data-step="analyze">
+                    <div class="step-icon"><i class="fas fa-wave-square"></i></div>
+                    <div class="step-text">Анализ</div>
+                </div>
+                <div class="step" data-step="transcribe">
+                    <div class="step-icon"><i class="fas fa-headphones"></i></div>
+                    <div class="step-text">Распознавание</div>
+                </div>
+                <div class="step" data-step="format">
+                    <div class="step-icon"><i class="fas fa-file-alt"></i></div>
+                    <div class="step-text">Форматирование</div>
+                </div>
+            </div>
             <div class="progress">
-                <div class="progress-bar" id="progress-bar"></div>
+                <div class="progress-bar" id="progress-bar" data-percent="0%"></div>
             </div>
             <p id="progress-status">Подготовка аудиофайла...</p>
+            <button class="btn secondary" id="cancel-process" style="margin-top: 15px;">Отменить</button>
         </div>
         
         <div class="results" id="results-container" style="display: none;">
             <h2>Результаты транскрипции</h2>
+            
+            <div id="video-info-results" class="video-info-results" style="display: none;">
+                <div class="video-info">
+                    <img id="results-video-thumbnail" src="" alt="Превью видео">
+                    <div class="video-details">
+                        <h3 id="results-video-title">Название видео</h3>
+                        <p id="results-video-author">Автор: <span></span></p>
+                        <p id="results-video-duration">Длительность: <span></span></p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="transcript-controls">
+                <div class="search-box">
+                    <input type="text" id="search-transcript" placeholder="Поиск в тексте...">
+                    <span id="search-results">0/0</span>
+                    <button id="search-prev" class="btn icon-btn" disabled><i class="fas fa-chevron-up"></i></button>
+                    <button id="search-next" class="btn icon-btn" disabled><i class="fas fa-chevron-down"></i></button>
+                </div>
+                <div class="filter-box">
+                    <select id="speaker-filter">
+                        <option value="all">Все участники</option>
+                    </select>
+                </div>
+            </div>
+            
             <div class="transcript-box">
                 <div class="transcript-content" id="transcript-content"></div>
                 <div class="transcript-actions">
@@ -110,6 +182,45 @@
                     <button class="btn" id="download-docx">
                         <i class="fas fa-file-word"></i> Скачать DOCX
                     </button>
+                    <button class="btn" id="share-transcript">
+                        <i class="fas fa-share-alt"></i> Поделиться
+                    </button>
+                    <button class="btn" id="new-transcription">
+                        <i class="fas fa-plus"></i> Новая транскрипция
+                    </button>
+                </div>
+            </div>
+            
+            <div class="analytics" id="analytics-container" style="display: none;">
+                <h3>Аналитика диалога</h3>
+                <div class="analytics-content">
+                    <div class="speakers-stats" id="speakers-stats"></div>
+                    <div class="word-cloud-container">
+                        <h4>Ключевые слова</h4>
+                        <div id="word-cloud"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Модальное окно для поделиться -->
+    <div class="modal" id="share-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Поделиться транскрипцией</h3>
+                <button class="close-btn" id="close-share-modal"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="modal-body">
+                <p>Используйте эту ссылку для доступа к транскрипции:</p>
+                <div class="share-link-container">
+                    <input type="text" id="share-link" readonly>
+                    <button id="copy-share-link" class="btn primary"><i class="fas fa-copy"></i></button>
+                </div>
+                <div class="social-share">
+                    <button class="btn social-btn" id="share-telegram"><i class="fab fa-telegram"></i> Telegram</button>
+                    <button class="btn social-btn" id="share-whatsapp"><i class="fab fa-whatsapp"></i> WhatsApp</button>
+                    <button class="btn social-btn" id="share-vk"><i class="fab fa-vk"></i> ВКонтакте</button>
                 </div>
             </div>
         </div>

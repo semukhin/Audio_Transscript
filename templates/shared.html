@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Транскрипция аудио - Общий доступ</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <meta property="og:title" content="Транскрипция аудио">
+    <meta property="og:description" content="Преобразование аудио в текст с поддержкой таймингов речи">
+    <meta property="og:image" content="{{ url_for('static', filename='img/preview.png', _external=True) }}">
+</head>
+<body class="shared-page light-mode">
+    <div class="container">
+        <header>
+            <div class="shared-header">
+                <div class="logo">
+                    <img src="{{ url_for('static', filename='img/logo.svg') }}" alt="Логотип">
+                </div>
+                <div class="header-controls">
+                    <button id="theme-toggle" class="theme-toggle">
+                        <i class="fas fa-moon"></i>
+                    </button>
+                </div>
+            </div>
+            <h1>Транскрипция аудио</h1>
+            <p class="subtitle">Общий доступ к результатам транскрипции</p>
+        </header>
+        
+        <div class="results shared-results">
+            {% if video_info %}
+            <div class="video-info-results">
+                <div class="video-info">
+                    {% if video_info.thumbnail %}
+                    <img src="{{ video_info.thumbnail }}" alt="Превью видео">
+                    {% endif %}
+                    <div class="video-details">
+                        <h3>{{ video_info.title }}</h3>
+                        <p>Автор: <span>{{ video_info.uploader }}</span></p>
+                        {% if video_info.duration %}
+                        <p>Длительность: <span>{{ '{:02d}:{:02d}'.format(video_info.duration // 60, video_info.duration % 60) }}</span></p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            
+            <div class="transcript-controls">
+                <div class="search-box">
+                    <input type="text" id="search-transcript" placeholder="Поиск в тексте...">
+                    <span id="search-results">0/0</span>
+                    <button id="search-prev" class="btn icon-btn" disabled><i class="fas fa-chevron-up"></i></button>
+                    <button id="search-next" class="btn icon-btn" disabled><i class="fas fa-chevron-down"></i></button>
+                </div>
+                <div class="filter-box">
+                    <select id="speaker-filter">
+                        <option value="all">Все участники</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="transcript-box">
+                <div class="transcript-content" id="transcript-content">
+                {% if with_timestamps and transcript is iterable and transcript is not string %}
+                    {% for segment in transcript %}
+                    <div class="transcript-line">
+                        <span class="transcript-time">{{ segment.start_time }}</span>
+                        <span class="transcript-speaker">{{ segment.speaker }}:</span>
+                        <span class="transcript-text">{{ segment.text }}</span>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    {{ transcript }}
+                {% endif %}
+                </div>
+                <div class="transcript-actions">
+                    <button class="btn" id="copy-transcript">
+                        <i class="fas fa-copy"></i> Копировать
+                    </button>
+                    <button class="btn" id="download-docx">
+                        <i class="fas fa-file-word"></i> Скачать DOCX
+                    </button>
+                    <a href="/" class="btn">
+                        <i class="fas fa-home"></i> На главную
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Уведомления -->
+    <div class="toast" id="toast"></div>
+    
+    <footer>
+        <p>&copy; 2025 Транскрипция аудио | Powered by Google Speech-to-Text API</p>
+    </footer>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Переключение темы
+            const themeToggle = document.getElementById('theme-toggle');
+            const body = document.body;
+            
+            function setTheme(isDark) {
+                if (isDark) {
+                    body.classList.add('dark-mode');
+                    body.classList.remove('light-mode');
+                    themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
+                } else {
+                    body.classList.add('light-mode');
+                    body.classList.remove('dark-mode');
+                    themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
+                }
+                localStorage.setItem('darkMode', isDark);
+            }
+            
+            // Проверяем сохраненные настройки темы
+            const savedDarkMode = localStorage.getItem('darkMode') === 'true';
+            setTheme(savedDarkMode);
+            
+            themeToggle.addEventListener('click', function() {
+                const isDarkMode = body.classList.contains('dark-mode');
+                setTheme(!isDarkMode);
+            });
+            
+            // Поиск по тексту
+            const searchInput = document.getElementById('search-transcript');
+            const searchPrev = document.getElementById('search-prev');
+            const searchNext = document.getElementById('search-next');
+            const searchResults = document.getElementById('search-results');
+            const transcriptContent = document.getElementById('transcript-content');
+            
+            let matchedNodes = [];
+            let currentMatchIndex = -1;
+            
+            function showToast(message, type = 'success') {
+                const toast = document.getElementById('toast');
+                toast.textContent = message;
+                toast.className = 'toast ' + type;
+                toast.classList.add('show');
+                
+                setTimeout(() => {
+                    toast.classList.remove('show');
+                }, 3000);
+            }
+            
+            searchInput.addEventListener('input', function() {
+                const searchTerm = this.value.trim().toLowerCase();
+                
+                // Сбрасываем предыдущие результаты поиска
+                transcriptContent.querySelectorAll('.highlight').forEach(el => {
+                    const parent = el.parentNode;
+                    parent.replaceChild(document.createTextNode(el.textContent), el);
+                    parent.normalize();
+                });
+                
+                matchedNodes = [];
+                currentMatchIndex = -1;
+                searchResults.textContent = '0/0';
+                searchPrev.disabled = true;
+                searchNext.disabled = true;
+                
+                if (searchTerm.length < 2) return;
+                
+                function searchInTextNodes(node) {
+                    if (node.nodeType === 3) { // Текстовый узел
+                        const text = node.textContent.toLowerCase();
+                        const index = text.indexOf(searchTerm);
+                        
+                        if (index >= 0) {
+                            const range = document.createRange();
+                            const spanNode = document.createElement('span');
+                            spanNode.className = 'highlight';
+                            spanNode.textContent = node.textContent.substring(index, index + searchTerm.length);
+                            
+                            range.setStart(node, index);
+                            range.setEnd(node, index + searchTerm.length);
+                            range.deleteContents();
+                            range.insertNode(spanNode);
+                            
+                            matchedNodes.push(spanNode);
+                            
+                            // Продолжаем поиск в оставшейся части текста
+                            if (spanNode.nextSibling) {
+                                searchInTextNodes(spanNode.nextSibling);
+                            }
+                            
+                            return;
+                        }
+                    } else if (node.nodeType === 1) { // Элемент
+                        Array.from(node.childNodes).forEach(child => {
+                            searchInTextNodes(child);
+                        });
+                    }
+                }
+                
+                searchInTextNodes(transcriptContent);
+                
+                if (matchedNodes.length > 0) {
+                    searchResults.textContent = `1/${matchedNodes.length}`;
+                    currentMatchIndex = 0;
+                    searchPrev.disabled = false;
+                    searchNext.disabled = false;
+                    highlightMatch(0);
+                } else {
+                    searchResults.textContent = '0/0';
+                }
+            });
+            
+            function highlightMatch(index) {
+                // Удаляем активную подсветку
+                transcriptContent.querySelectorAll('.highlight.active').forEach(el => {
+                    el.classList.remove('active');
+                });
+                
+                if (index >= 0 && index < matchedNodes.length) {
+                    const node = matchedNodes[index];
+                    node.classList.add('active');
+                    node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    
+                    searchResults.textContent = `${index + 1}/${matchedNodes.length}`;
+                }
+            }
+            
+            searchNext.addEventListener('click', function() {
+                if (matchedNodes.length === 0) return;
+                
+                currentMatchIndex = (currentMatchIndex + 1) % matchedNodes.length;
+                highlightMatch(currentMatchIndex);
+            });
+            
+            searchPrev.addEventListener('click', function() {
+                if (matchedNodes.length === 0) return;
+                
+                currentMatchIndex = (currentMatchIndex - 1 + matchedNodes.length) % matchedNodes.length;
+                highlightMatch(currentMatchIndex);
+            });
+            
+            // Фильтрация по говорящим
+            const speakerFilter = document.getElementById('speaker-filter');
+            
+            // Получаем всех говорящих и добавляем их в фильтр
+            const speakerElements = transcriptContent.querySelectorAll('.transcript-speaker');
+            const speakers = new Set();
+            
+            speakerElements.forEach(el => {
+                const speaker = el.textContent.replace(':', '').trim();
+                speakers.add(speaker);
+            });
+            
+            speakers.forEach(speaker => {
+                const option = document.createElement('option');
+                option.value = speaker;
+                option.textContent = speaker;
+                speakerFilter.appendChild(option);
+            });
+            
+            speakerFilter.addEventListener('change', function() {
+                const selectedSpeaker = this.value;
+                
+                if (selectedSpeaker === 'all') {
+                    transcriptContent.querySelectorAll('.transcript-line').forEach(line => {
+                        line.style.display = '';
+                    });
+                } else {
+                    transcriptContent.querySelectorAll('.transcript-line').forEach(line => {
+                        const speaker = line.querySelector('.transcript-speaker').textContent.replace(':', '').trim();
+                        line.style.display = (speaker === selectedSpeaker) ? '' : 'none';
+                    });
+                }
+            });
+            
+            // Копирование текста
+            const copyButton = document.getElementById('copy-transcript');
+            
+            copyButton.addEventListener('click', function() {
+                let text;
+                
+                // Проверяем, содержит ли транскрипция HTML-разметку
+                if (transcriptContent.querySelector('.transcript-line')) {
+                    // Извлекаем текстовое содержимое, сохраняя структуру
+                    text = Array.from(transcriptContent.querySelectorAll('.transcript-line'))
+                        .map(line => {
+                            const time = line.querySelector('.transcript-time')?.textContent || '';
+                            const speaker = line.querySelector('.transcript-speaker')?.textContent || '';
+                            const textContent = line.querySelector('.transcript-text')?.textContent || '';
+                            return `[${time}] ${speaker} ${textContent}`;
+                        })
+                        .join('\n\n');
+                } else {
+                    // Простой текст
+                    text = transcriptContent.textContent;
+                }
+                
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(text)
+                        .then(() => {
+                            showToast('Текст скопирован в буфер обмена', 'success');
+                        })
+                        .catch(err => {
+                            showToast('Не удалось скопировать текст', 'error');
+                        });
+                } else {
+                    // Fallback для старых браузеров
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    
+                    try {
+                        document.execCommand('copy');
+                        showToast('Текст скопирован в буфер обмена', 'success');
+                    } catch (err) {
+                        showToast('Не удалось скопировать текст', 'error');
+                    }
+                    
+                    document.body.removeChild(textarea);
+                }
+            });
+            
+            // Скачивание DOCX
+            const downloadButton = document.getElementById('download-docx');
+            {% if docx_path %}
+            downloadButton.addEventListener('click', function() {
+                window.location.href = '/download/{{ docx_path }}';
+            });
+            {% else %}
+            downloadButton.addEventListener('click', function() {
+                showToast('Файл не найден', 'error');
+            });
+            {% endif %}
+        });
+    </script>
+</body>
+</html>
