@@ -1,0 +1,8 @@
+flask==2.3.3
+werkzeug==2.3.7
+google-cloud-speech==2.21.0
+google-auth==2.23.0
+yt-dlp==2023.7.6
+python-docx==0.8.11
+gunicorn==21.2.0
+ffmpeg-python==0.2.0

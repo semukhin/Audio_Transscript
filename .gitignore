@@ -1,0 +1,11 @@
+venv/
+lawgpt2025-4a4960627584.json
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
