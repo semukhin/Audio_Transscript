@@ -1107,3 +1107,19 @@ body.dark-mode .language-dropdown:focus {
 body.dark-mode .language-indicator {
     background-color: var(--dark-primary);
 }
+
+.step-badge {
+    position: absolute;
+    top: -8px;
+    right: -10px;
+    background-color: #4285f4;
+    color: white;
+    border-radius: 12px;
+    padding: 2px 8px;
+    font-size: 10px;
+    font-weight: bold;
+}
+
+.chirp-badge {
+    background-color: #34a853;
+}
