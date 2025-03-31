@@ -349,7 +349,7 @@ def detect_audio_language(file_path):
         print(f"Ошибка при определении языка аудио: {e}")
         return 'ru-RU'  # В случае ошибки также используем русский
 
-def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None, use_vertex_ai=False):
+def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None, use_vertex_ai=True):
     """Транскрибирование аудиофайла с помощью Google Speech-to-Text API или Vertex AI."""
     # Функция-обертка для обновления статуса
     def update_status(percent, message):
@@ -418,9 +418,11 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
             return transcript
         
         except Exception as e:
-            update_status(100, f"Ошибка Vertex AI: {e}")
-            return f"Ошибка при распознавании Vertex AI: {str(e)}"
-  
+            # Если Vertex AI не удался, можно добавить откат к стандартному API
+            print(f"Ошибка Vertex AI: {e}. Используем стандартный Speech-to-Text API.")
+            use_vertex_ai = False
+
+
     update_status(2, f"Начало обработки аудиофайла (язык: {language_code})")
     
     credentials = get_credentials()
@@ -1284,7 +1286,15 @@ def get_task_status(task_id):
         return jsonify(task_status[task_id])
     return jsonify({'status': 'unknown', 'percent': 0, 'message': 'Задача не найдена'})
 
-def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-RU'):
+def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-RU', use_vertex_ai=True):
+    transcript = transcribe_audio(
+        file_path, 
+        enable_timestamps=enable_timestamps, 
+        status_callback=update_status,
+        language_code=language_code,
+        use_vertex_ai=use_vertex_ai
+    )
+       
     """Обработка аудиофайла в отдельном потоке"""
     try:
         # Функция обновления статуса
@@ -1343,7 +1353,7 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
             'message': f'Ошибка: {str(e)}'
         }
 
-def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU'):
+def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU', use_vertex_ai=True):
     """Обработка ссылки на YouTube в отдельном потоке"""
     try:
         # Функция обновления статуса

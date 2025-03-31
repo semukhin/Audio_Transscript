@@ -1,18 +1,17 @@
-# Создайте файл config.py с настройками проекта
 import os
 
 class Config:
     # Основные настройки приложения
     DEBUG = False
     TESTING = False
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'сгенерируйте-сложный-ключ'
+    SECRET_KEY = os.environ.get('SECRET_KEY') or '______________'
     
     # Настройки загрузки файлов
     UPLOAD_FOLDER = 'uploads'
     MAX_CONTENT_LENGTH = 100 * 1024 * 1024  # 100 МБ
     
     # Путь к учетным данным Google Cloud
-    CREDENTIALS_PATH = os.environ.get('GOOGLE_CREDENTIALS_PATH') or '/home/semukhin/Documents/GitHub/Audio_Transscript/lawgpt2025-4a4960627584.json'
+    CREDENTIALS_PATH = '/home/semukhin/Documents/GitHub/Audio_Transscript/lawgpt2025-4a4960627584.json'
 
     # Настройки сессий
     SESSION_EXPIRY = 24 * 60 * 60  # 24 часа в секундах
@@ -24,8 +23,8 @@ class Config:
     DEFAULT_LANGUAGE = 'ru-RU'
     
     # Настройки для Vertex AI
-    VERTEX_AI_PROJECT = os.environ.get('VERTEX_AI_PROJECT')
-    VERTEX_AI_LOCATION = os.environ.get('VERTEX_AI_LOCATION', 'us-central1')
+    VERTEX_AI_PROJECT = 'lawgpt2025'
+    VERTEX_AI_LOCATION = 'us-central1'
 
 class DevelopmentConfig(Config):
     DEBUG = True
@@ -49,7 +48,3 @@ config = {
     'default': DevelopmentConfig
 }
 
-class Config:
-    # Добавить настройки для Vertex AI
-    VERTEX_AI_PROJECT = os.environ.get('VERTEX_AI_PROJECT')
-    VERTEX_AI_LOCATION = os.environ.get('VERTEX_AI_LOCATION', 'us-central1')
