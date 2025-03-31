@@ -1,0 +1,34 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Установка необходимых пакетов
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копирование файлов приложения
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Создание директорий для загрузок и временных файлов
+RUN mkdir -p /app/uploads /tmp/transcripts /app/static/img
+
+# Копирование всего приложения
+COPY . .
+
+# Создание пользователя без привилегий
+RUN useradd -m appuser && chown -R appuser:appuser /app /tmp/transcripts
+USER appuser
+
+# Определение переменных окружения
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    FLASK_APP=app.py \
+    FLASK_ENV=production \
+    UPLOAD_FOLDER=/app/uploads \
+    WHISPER_SERVICE_URL=http://whisper:5001/transcribe
+
+# Запуск приложения через Gunicorn
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "3", "--timeout", "300", "app:app"]

@@ -1649,8 +1649,8 @@ def get_task_status(task_id):
         return jsonify(task_status[task_id])
     return jsonify({'status': 'unknown', 'percent': 0, 'message': 'Задача не найдена'})
 
-def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-RU', use_vertex_ai=False):
-    """Обработка аудиофайла в отдельном потоке - обновлено для использования Chirp 2"""
+def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-RU'):
+    """Обработка аудиофайла в отдельном потоке"""
     try:
         # Функция обновления статуса
         def update_status(percent, message):
@@ -1661,16 +1661,16 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
             }
         
         # Обновляем начальный статус
-        update_status(5, "Начало транскрибирования с Chirp 2")
+        update_status(5, "Начало транскрибирования")
         
-        # Запускаем транскрибирование с указанным языком
-        # Важно: параметр use_vertex_ai=False, т.к. мы используем Chirp 2 через Speech API
-        transcript = transcribe_audio(
+        # Используем Whisper вместо Google Speech-to-Text
+        from whisper_service import transcribe_with_whisper
+        
+        transcript = transcribe_with_whisper(
             file_path, 
-            enable_timestamps=enable_timestamps, 
-            status_callback=update_status,
             language_code=language_code,
-            use_vertex_ai=False
+            enable_timestamps=enable_timestamps, 
+            status_callback=update_status
         )
         
         # Генерируем ID сессии
@@ -1692,7 +1692,7 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
         task_status[task_id] = {
             'status': 'complete',
             'percent': 100,
-            'message': 'Транскрипция завершена с Chirp 2',
+            'message': 'Транскрипция завершена',
             'transcript': transcript,
             'docx_path': os.path.basename(docx_path),
             'with_timestamps': enable_timestamps,
@@ -1709,7 +1709,7 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
             'percent': 0,
             'message': f'Ошибка: {str(e)}'
         }
-
+        
 def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU', use_vertex_ai=False):
     """Обработка ссылки на YouTube в отдельном потоке - обновлено для использования Chirp 2"""
     try:

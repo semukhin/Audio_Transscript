@@ -1,0 +1,33 @@
+FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
+
+WORKDIR /app
+
+# Установка необходимых системных зависимостей
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Установка OpenAI Whisper и нужных Python-пакетов
+RUN pip install --no-cache-dir \
+    openai-whisper \
+    fastapi \
+    uvicorn \
+    python-multipart \
+    pydantic
+
+# Создание директорий для моделей и файлов
+RUN mkdir -p /app/models /app/uploads
+
+# Копирование кода сервиса
+COPY whisper_api.py .
+
+# Создание пользователя без привилегий
+RUN useradd -m whisperuser && chown -R whisperuser:whisperuser /app
+USER whisperuser
+
+# Скачивание выбранной модели при запуске контейнера
+ENV WHISPER_MODEL_SIZE=small
+ENV PYTHONUNBUFFERED=1
+
+# Запуск API сервиса
+CMD ["uvicorn", "whisper_api:app", "--host", "0.0.0.0", "--port", "5001"]
