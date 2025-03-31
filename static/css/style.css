@@ -1061,3 +1061,49 @@ footer {
         margin: 5px 0;
     }
 }
+
+.language-selector {
+    margin: 15px 0;
+    display: flex;
+    align-items: center;
+}
+
+.language-selector label {
+    margin-right: 10px;
+    font-weight: 500;
+}
+
+.language-dropdown {
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    font-size: 14px;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    min-width: 150px;
+}
+
+.language-dropdown:focus {
+    border-color: var(--primary-color);
+    outline: none;
+}
+
+body.dark-mode .language-dropdown:focus {
+    border-color: var(--dark-primary);
+}
+
+/* Стиль для языкового индикатора в результатах */
+.language-indicator {
+    display: inline-block;
+    background-color: var(--primary-color);
+    color: white;
+    font-size: 0.8em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-right: 10px;
+    font-weight: bold;
+}
+
+body.dark-mode .language-indicator {
+    background-color: var(--dark-primary);
+}

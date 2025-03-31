@@ -75,6 +75,47 @@ document.addEventListener('DOMContentLoaded', function() {
     const speakersStats = document.getElementById('speakers-stats');
     const wordCloud = document.getElementById('word-cloud');
     const themeToggle = document.getElementById('theme-toggle');
+    const languageSelect = document.getElementById('language-select');
+    const recordLanguageSelect = document.getElementById('record-language-select');
+    const linkLanguageSelect = document.getElementById('link-language-select');
+    
+    // Функции для работы с выбором языка
+    function saveSelectedLanguage(lang) {
+        localStorage.setItem('preferredLanguage', lang);
+        
+        // Синхронизируем все селекторы языка
+        if (languageSelect) languageSelect.value = lang;
+        if (recordLanguageSelect) recordLanguageSelect.value = lang;
+        if (linkLanguageSelect) linkLanguageSelect.value = lang;
+    }
+
+    function loadSelectedLanguage() {
+        const savedLang = localStorage.getItem('preferredLanguage');
+        if (savedLang) {
+            if (languageSelect) languageSelect.value = savedLang;
+            if (recordLanguageSelect) recordLanguageSelect.value = savedLang;
+            if (linkLanguageSelect) linkLanguageSelect.value = savedLang;
+        }
+    }
+
+    // Добавляем обработчики событий для селекторов языка
+    if (languageSelect) {
+        languageSelect.addEventListener('change', function() {
+            saveSelectedLanguage(this.value);
+        });
+    }
+
+    if (recordLanguageSelect) {
+        recordLanguageSelect.addEventListener('change', function() {
+            saveSelectedLanguage(this.value);
+        });
+    }
+
+    if (linkLanguageSelect) {
+        linkLanguageSelect.addEventListener('change', function() {
+            saveSelectedLanguage(this.value);
+        });
+    }
     
     // Переключение темной/светлой темы
     themeToggle.addEventListener('click', function() {
@@ -201,6 +242,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const formData = new FormData();
         formData.append('file', file);
         formData.append('timestamps', timestampsCheckbox.checked);
+        // Добавляем выбранный язык
+        formData.append('language', languageSelect ? languageSelect.value : 'ru-RU');
         
         uploadFile(formData);
     });
@@ -483,6 +526,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const formData = new FormData();
         formData.append('audio_data', recordedBlob, 'recording.wav');
         formData.append('timestamps', recordTimestampsCheckbox.checked);
+        // Добавляем выбранный язык
+        formData.append('language', recordLanguageSelect ? recordLanguageSelect.value : 'ru-RU');
         
         uploadFile(formData);
     });
@@ -570,7 +615,8 @@ document.addEventListener('DOMContentLoaded', function() {
             },
             body: JSON.stringify({ 
                 url: link,
-                timestamps: linkTimestampsCheckbox.checked
+                timestamps: linkTimestampsCheckbox.checked,
+                language: linkLanguageSelect ? linkLanguageSelect.value : 'ru-RU'
             })
         })
         .then(response => {
@@ -723,7 +769,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         showToast('Не удалось скопировать ссылку', 'error');
                     });
             } else {
-                try {
+try {
                     document.execCommand('copy');
                     showToast('Ссылка скопирована в буфер обмена', 'success');
                 } catch (err) {
@@ -1119,7 +1165,13 @@ document.addEventListener('DOMContentLoaded', function() {
             currentSessionId: currentSessionId,
             transcriptHTML: transcriptContent.innerHTML,
             resultsVisible: resultsContainer.style.display !== 'none',
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            language: (
+                (currentTab === 'upload' && languageSelect) ? languageSelect.value : 
+                (currentTab === 'record' && recordLanguageSelect) ? recordLanguageSelect.value : 
+                (currentTab === 'link' && linkLanguageSelect) ? linkLanguageSelect.value : 
+                'ru-RU'
+            )
         };
         
         localStorage.setItem('transcriptionSessionState', JSON.stringify(currentState));
@@ -1137,6 +1189,11 @@ document.addEventListener('DOMContentLoaded', function() {
             if (now - savedState.timestamp > 24 * 60 * 60 * 1000) {
                 localStorage.removeItem('transcriptionSessionState');
                 return;
+            }
+            
+            // Восстанавливаем выбранный язык
+            if (savedState.language) {
+                saveSelectedLanguage(savedState.language);
             }
             
             // Восстанавливаем состояние вкладки
@@ -1207,6 +1264,9 @@ document.addEventListener('DOMContentLoaded', function() {
             localStorage.removeItem('transcriptionSessionState');
         }
     }
+    
+    // Загрузка сохраненного языка при инициализации
+    loadSelectedLanguage();
     
     // Восстанавливаем состояние сессии при загрузке страницы
     restoreSessionState();

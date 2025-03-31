@@ -20,7 +20,7 @@
                 </button>
             </div>
             <h1>Транскрипция аудио в текст</h1>
-            <p class="subtitle">Профессиональное преобразование аудио в текст с поддержкой таймингов речи</p>
+            <p class="subtitle">Преобразование аудио в текст с поддержкой таймингов речи</p>
         </header>
         
         <div class="tabs">
@@ -46,6 +46,22 @@
                         <input type="file" id="file-input" accept=".wav,.mp3,.ogg,.flac,.m4a,.aac,.webm,.opus" hidden>
                         <button class="btn primary" id="browse-button">Выбрать файл</button>
                     </div>
+                    <div class="language-selector">
+                        <label for="language-select">Язык аудио:</label>
+                        <select id="language-select" class="language-dropdown">
+                            <option value="ru-RU" selected>Русский</option>
+                            <option value="en-US">Английский</option>
+                            <option value="uk-UA">Украинский</option>
+                            <option value="be-BY">Белорусский</option>
+                            <option value="kk-KZ">Казахский</option>
+                            <option value="de-DE">Немецкий</option>
+                            <option value="fr-FR">Французский</option>
+                            <option value="es-ES">Испанский</option>
+                            <option value="it-IT">Итальянский</option>
+                            <option value="zh-CN">Китайский</option>
+                            <option value="ja-JP">Японский</option>
+                        </select>
+                        </div>
                     <div class="file-info" id="file-info" style="display: none;">
                         <p>Выбранный файл: <span id="file-name"></span></p>
                         <div class="checkbox-container">
@@ -75,6 +91,22 @@
                                     <div class="level-bar" id="level-bar"></div>
                                 </div>
                             </div>
+                        </div>
+                        <div class="language-selector">
+                            <label for="record-language-select">Язык аудио:</label>
+                            <select id="record-language-select" class="language-dropdown">
+                              <option value="ru-RU" selected>Русский</option>
+                              <option value="en-US">Английский</option>
+                              <option value="uk-UA">Украинский</option>
+                              <option value="be-BY">Белорусский</option>
+                              <option value="kk-KZ">Казахский</option>
+                              <option value="de-DE">Немецкий</option>
+                              <option value="fr-FR">Французский</option>
+                              <option value="es-ES">Испанский</option>
+                              <option value="it-IT">Итальянский</option>
+                              <option value="zh-CN">Китайский</option>
+                              <option value="ja-JP">Японский</option>
+                            </select>
                         </div>
                         <div class="record-preview" id="record-preview" style="display: none;">
                             <audio id="audio-preview" controls></audio>
@@ -106,6 +138,22 @@
                                     <p id="video-duration">Длительность: <span></span></p>
                                 </div>
                             </div>
+                        </div>
+                        <div class="language-selector">
+                            <label for="link-language-select">Язык аудио:</label>
+                            <select id="link-language-select" class="language-dropdown">
+                              <option value="ru-RU" selected>Русский</option>
+                              <option value="en-US">Английский</option>
+                              <option value="uk-UA">Украинский</option>
+                              <option value="be-BY">Белорусский</option>
+                              <option value="kk-KZ">Казахский</option>
+                              <option value="de-DE">Немецкий</option>
+                              <option value="fr-FR">Французский</option>
+                              <option value="es-ES">Испанский</option>
+                              <option value="it-IT">Итальянский</option>
+                              <option value="zh-CN">Китайский</option>
+                              <option value="ja-JP">Японский</option>
+                            </select>
                         </div>
                         <div class="checkbox-container" style="margin-top: 15px;">
                             <input type="checkbox" id="link-timestamps-checkbox" class="custom-checkbox" checked>

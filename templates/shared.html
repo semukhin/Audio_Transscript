@@ -26,6 +26,39 @@
             </div>
             <h1>Транскрипция аудио</h1>
             <p class="subtitle">Общий доступ к результатам транскрипции</p>
+            
+            <!-- Добавленный блок для отображения языка -->
+            {% if language %}
+            <div class="language-info">
+                <span class="language-indicator">
+                    {% if language == 'ru-RU' %}
+                        <i class="fas fa-language"></i> Русский
+                    {% elif language == 'en-US' %}
+                        <i class="fas fa-language"></i> Английский
+                    {% elif language == 'uk-UA' %}
+                        <i class="fas fa-language"></i> Украинский
+                    {% elif language == 'be-BY' %}
+                        <i class="fas fa-language"></i> Белорусский
+                    {% elif language == 'kk-KZ' %}
+                        <i class="fas fa-language"></i> Казахский
+                    {% elif language == 'de-DE' %}
+                        <i class="fas fa-language"></i> Немецкий
+                    {% elif language == 'fr-FR' %}
+                        <i class="fas fa-language"></i> Французский
+                    {% elif language == 'es-ES' %}
+                        <i class="fas fa-language"></i> Испанский
+                    {% elif language == 'it-IT' %}
+                        <i class="fas fa-language"></i> Итальянский
+                    {% elif language == 'zh-CN' %}
+                        <i class="fas fa-language"></i> Китайский
+                    {% elif language == 'ja-JP' %}
+                        <i class="fas fa-language"></i> Японский
+                    {% else %}
+                        <i class="fas fa-language"></i> {{ language }}
+                    {% endif %}
+                </span>
+            </div>
+            {% endif %}
         </header>
         
         <div class="results shared-results">
