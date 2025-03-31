@@ -22,9 +22,13 @@ class Config:
     # Настройки языка по умолчанию
     DEFAULT_LANGUAGE = 'ru-RU'
     
-    # Настройки для Vertex AI
+    # Настройки для Vertex AI (больше не используется для Chirp 2)
     VERTEX_AI_PROJECT = 'lawgpt2025'
     VERTEX_AI_LOCATION = 'us-central1'
+    
+    # Настройки для Chirp 2
+    USE_CHIRP_2 = True  # Флаг для включения/отключения Chirp 2
+    SPEECH_API_LOCATION = 'global'  # Регион для Speech-to-Text API
 
 class DevelopmentConfig(Config):
     DEBUG = True
@@ -47,4 +51,3 @@ config = {
     'production': ProductionConfig,
     'default': DevelopmentConfig
 }
-
