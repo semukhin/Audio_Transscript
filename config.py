@@ -22,6 +22,10 @@ class Config:
     
     # Настройки языка по умолчанию
     DEFAULT_LANGUAGE = 'ru-RU'
+    
+    # Настройки для Vertex AI
+    VERTEX_AI_PROJECT = os.environ.get('VERTEX_AI_PROJECT')
+    VERTEX_AI_LOCATION = os.environ.get('VERTEX_AI_LOCATION', 'us-central1')
 
 class DevelopmentConfig(Config):
     DEBUG = True
@@ -44,3 +48,8 @@ config = {
     'production': ProductionConfig,
     'default': DevelopmentConfig
 }
+
+class Config:
+    # Добавить настройки для Vertex AI
+    VERTEX_AI_PROJECT = os.environ.get('VERTEX_AI_PROJECT')
+    VERTEX_AI_LOCATION = os.environ.get('VERTEX_AI_LOCATION', 'us-central1')

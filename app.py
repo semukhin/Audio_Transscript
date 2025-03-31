@@ -6,6 +6,7 @@ import time
 import datetime
 import threading
 import re
+import base64
 from flask import Flask, render_template, request, jsonify, send_file, url_for
 from werkzeug.utils import secure_filename
 from google.cloud import speech
@@ -20,6 +21,13 @@ import traceback
 from config import config as app_config
 import magic
 from langdetect import detect, LangDetectException
+
+from google.cloud import aiplatform
+from google.cloud.aiplatform.gapic import PredictionServiceClient
+from google.cloud.aiplatform_v1.services.prediction_service.client import PredictionServiceClient
+from google.protobuf import json_format
+from google.protobuf.struct_pb2 import Value
+
 
 # Определение конфигурации в зависимости от окружения
 config_name = os.environ.get('FLASK_CONFIG', 'default')
@@ -341,14 +349,78 @@ def detect_audio_language(file_path):
         print(f"Ошибка при определении языка аудио: {e}")
         return 'ru-RU'  # В случае ошибки также используем русский
 
-def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None):
-    """Транскрибирование аудиофайла с помощью Google Speech-to-Text API."""
+def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None, use_vertex_ai=False):
+    """Транскрибирование аудиофайла с помощью Google Speech-to-Text API или Vertex AI."""
     # Функция-обертка для обновления статуса
     def update_status(percent, message):
         print(f"[Прогресс] {percent}%: {message}")
         if status_callback:
             status_callback(percent, message)
     
+    # Условие для использования Vertex AI
+    if use_vertex_ai:
+        try:
+            import base64
+            from google.cloud import aiplatform
+            from google.protobuf import json_format
+            from google.protobuf.struct_pb2 import Value
+
+            update_status(2, f"Начало обработки в Vertex AI (язык: {language_code})")
+            
+            # Подготовка файла
+            prepared_file_path = prepare_audio_for_transcription(file_path, update_status)
+            
+            # Кодирование аудио
+            with open(prepared_file_path, 'rb') as audio_file:
+                audio_content = base64.b64encode(audio_file.read()).decode('utf-8')
+            
+            # Инициализация Vertex AI
+            aiplatform.init(
+                project=os.environ.get('VERTEX_AI_PROJECT'),
+                location=os.environ.get('VERTEX_AI_LOCATION', 'us-central1')
+            )
+            
+            # Клиент Vertex AI
+            prediction_client = PredictionServiceClient()
+            endpoint = f"projects/{os.environ.get('VERTEX_AI_PROJECT')}/locations/{os.environ.get('VERTEX_AI_LOCATION', 'us-central1')}/endpoints/speech_recognition_endpoint"
+            
+            # Параметры запроса
+            instances = [{
+                'audio_content': audio_content,
+                'config': {
+                    'language_code': language_code,
+                    'enable_automatic_punctuation': True,
+                    'model': 'large_v2',
+                    'enable_speaker_diarization': enable_timestamps
+                }
+            }]
+            
+            # Выполнение распознавания
+            update_status(50, "Распознавание речи в Vertex AI")
+            response = prediction_client.predict(
+                endpoint=endpoint, 
+                instances=[json_format.ParseDict(instance, Value()) for instance in instances]
+            )
+            
+            # Обработка результатов
+            transcript = response.predictions[0]['transcript']
+            
+            if enable_timestamps:
+                speakers = response.predictions[0].get('speakers', [])
+                result = [{
+                    'speaker': f"Говорящий {segment['speaker_id']}",
+                    'text': segment['text'],
+                    'start_time': format_time(segment.get('start_time', 0))
+                } for segment in speakers]
+                
+                return result
+            
+            return transcript
+        
+        except Exception as e:
+            update_status(100, f"Ошибка Vertex AI: {e}")
+            return f"Ошибка при распознавании Vertex AI: {str(e)}"
+  
     update_status(2, f"Начало обработки аудиофайла (язык: {language_code})")
     
     credentials = get_credentials()
@@ -577,7 +649,7 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
                             elif word.speaker_tag != current_speaker:
                                 # Новый говорящий - сохраняем предыдущий сегмент
                                 speaker_segments.append({
-                                    "speaker": f"Говорящий {current_speaker}",
+                                    "speaker": f"Участник {current_speaker}",
                                     "text": current_text.strip(),
                                     "start_time": format_time(current_start_time)
                                 })
@@ -591,7 +663,7 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
                         # Добавляем последний сегмент
                         if current_text:
                             speaker_segments.append({
-                                "speaker": f"Говорящий {current_speaker}",
+                                "speaker": f"Участник {current_speaker}",
                                 "text": current_text.strip(),
                                 "start_time": format_time(current_start_time)
                             })
@@ -607,7 +679,7 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
                         if i > 0 and len(result) > 0:
                             current_speaker = 2 if current_speaker == 1 else 1
                         result.append({
-                            "speaker": f"Говорящий {current_speaker}",
+                            "speaker": f"Участник {current_speaker}",
                             "text": alternative.transcript,
                             "start_time": format_time(start_time)
                         })
@@ -617,7 +689,7 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
                         current_speaker = 2 if current_speaker == 1 else 1
                     
                     result.append({
-                        "speaker": f"Говорящий {current_speaker}",
+                        "speaker": f"Участник {current_speaker}",
                         "text": alternative.transcript,
                         "start_time": "00:00"
                     })
@@ -666,6 +738,67 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
                 os.remove(prepared_file_path)
             except Exception as e:
                 print(f"Не удалось удалить временный файл: {e}")
+
+
+def transcribe_audio_vertex_ai(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None):
+    try:
+        # Инициализация клиента Vertex AI
+        aiplatform.init(
+            project=app.config['VERTEX_AI_PROJECT'], 
+            location=app.config['VERTEX_AI_LOCATION']
+        )
+        
+        # Подготовка аудиофайла (конвертация в нужный формат)
+        prepared_file = prepare_audio_for_transcription(file_path, status_callback)
+        
+        # Кодирование аудио в base64
+        with open(prepared_file, 'rb') as audio_file:
+            audio_content = base64.b64encode(audio_file.read()).decode('utf-8')
+        
+        # Формирование запроса к Vertex AI
+        prediction_client = PredictionServiceClient()
+        endpoint = f"projects/{app.config['VERTEX_AI_PROJECT']}/locations/{app.config['VERTEX_AI_LOCATION']}/endpoints/speech_recognition_endpoint"
+        
+        # Параметры запроса
+        instances = [{
+            'audio_content': audio_content,
+            'config': {
+                'language_code': language_code,
+                'enable_automatic_punctuation': True,
+                'model': 'large_v2',  # Актуальная модель Vertex AI
+                'enable_speaker_diarization': enable_timestamps
+            }
+        }]
+        
+        # Преобразование в совместимый формат
+        instances_pb = [json_format.ParseDict(instance, Value()) for instance in instances]
+        
+        # Выполнение распознавания
+        response = prediction_client.predict(
+            endpoint=endpoint, 
+            instances=instances_pb
+        )
+        
+        # Обработка результатов
+        transcript = response.predictions[0]['transcript']
+        
+        if enable_timestamps:
+            # Логика обработки результатов с таймингами
+            speakers = response.predictions[0].get('speakers', [])
+            result = []
+            for segment in speakers:
+                result.append({
+                    'speaker': f"Говорящий {segment['speaker_id']}",
+                    'text': segment['text'],
+                    'start_time': format_time(segment['start_time'])
+                })
+            return result
+        
+        return transcript
+    
+    except Exception as e:
+        print(f"Ошибка при распознавании в Vertex AI: {e}")
+        return str(e)
 
 def analyze_transcript(transcript, with_timestamps=False):
     """Расширенный анализ транскрипции с дополнительными метриками"""
@@ -893,11 +1026,20 @@ def analyze_transcript(transcript, with_timestamps=False):
 def get_video_info(url):
     """Получение информации о видео по ссылке"""
     ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'skip_download': True,
+        'format': 'bestaudio/best',
+        'outtmpl': '%(title)s.%(ext)s',  # Временный шаблон имени файла
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+            'preferredquality': '192',
+        }],
+        'quiet': False,
+        'no_warnings': False,
         'geo_bypass': True,
         'nocheckcertificate': True,
+        'ssl_verify': False,
+        'retries': 3,
+        'progress_hooks': []
     }
     
     try:
@@ -941,6 +1083,8 @@ def download_from_youtube(url, status_callback=None):
         'no_warnings': False,
         'geo_bypass': True,
         'nocheckcertificate': True,
+        'ssl_verify': False,
+        'retries': 3, 
         'progress_hooks': [lambda d: status_callback(
             min(10 + int(d.get('downloaded_percent', 0) * 0.3), 40), 
             f"Загрузка видео: {d.get('downloaded_percent', 0):.1f}%"
@@ -1454,6 +1598,30 @@ def analyze_transcript_api():
             'status': 'error',
             'message': f'Ошибка при анализе: {str(e)}'
         }), 500
+    
+
+def check_transcription_quality(transcript):
+    """
+    Проверка качества транскрипции
+    """
+    if isinstance(transcript, list):
+        # Проверка на повторы
+        unique_texts = set(segment['text'] for segment in transcript)
+        
+        # Проверка общей длины и информативности
+        total_words = sum(len(segment['text'].split()) for segment in transcript)
+        
+        # Оценка качества
+        if len(unique_texts) < len(transcript) * 0.5:
+            return "Возможно дублирование текста"
+        
+        if total_words < 10:
+            return "Слишком короткая транскрипция"
+        
+        return "Транскрипция выглядит корректной"
+    
+    return "Нет данных для анализа"
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
