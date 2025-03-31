@@ -369,15 +369,27 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
     
     client = speech.SpeechClient(credentials=credentials)
     
+    # Получаем длительность аудио в секундах
+    try:
+        from pydub import AudioSegment
+        audio_segment = AudioSegment.from_file(prepared_file_path)
+        audio_duration_seconds = len(audio_segment) / 1000  # длительность в секундах
+        update_status(18, f"Определена длительность аудио: {audio_duration_seconds:.1f} секунд")
+    except Exception as e:
+        print(f"Ошибка при определении длительности: {e}")
+        # Если не удалось определить длительность, предполагаем, что она большая
+        audio_duration_seconds = 61  # предполагаем, что больше минуты
+        update_status(18, "Не удалось определить длительность. Предполагаем, что файл длинный.")
+    
     # Проверяем размер файла
     file_size = os.path.getsize(prepared_file_path)
     file_name = os.path.basename(prepared_file_path)
     
     update_status(20, f"Подготовка файла {file_name} (размер: {file_size/1024/1024:.2f} МБ)")
     
-    # Если размер файла превышает 10 МБ
-    if file_size > 10 * 1024 * 1024:
-        update_status(25, f"Файл превышает лимит прямой отправки. Используем Cloud Storage.")
+    # Если размер файла превышает 10 МБ или длительность больше 60 секунд, используем Cloud Storage
+    if file_size > 10 * 1024 * 1024 or audio_duration_seconds > 60:
+        update_status(25, f"Файл требует загрузки в Cloud Storage (размер или длительность)")
         
         # Используем созданный бакет
         gcs_bucket_name = "audio_transscript"
@@ -458,9 +470,12 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
             update_status(48, f"Диаризация недоступна: {e}. Используем простое определение таймингов.")
     
     try:
-        # Для файлов в Cloud Storage всегда используем асинхронное распознавание
-        if file_size > 10 * 1024 * 1024:
-            update_status(50, "Запуск асинхронного распознавания для файла из GCS")
+        # Определяем, используется ли GCS (был ли загружен файл в облако)
+        is_gcs_used = 'gcs_uri' in locals()
+        
+        # Для файлов в Cloud Storage или длинных файлов всегда используем асинхронное распознавание
+        if is_gcs_used or audio_duration_seconds > 60:
+            update_status(50, "Запуск асинхронного распознавания")
             operation = client.long_running_recognize(config=config, audio=audio)
             
             update_status(52, "Ожидание завершения распознавания...")
@@ -476,11 +491,8 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
                     update_status(90, "Распознавание завершено")
                 else:
                     elapsed = time.time() - start_time
-                    # Оцениваем примерное время распознавания в зависимости от размера файла
-                    # (это приблизительно, так как точное время зависит от многих факторов)
-                    estimated_total = file_size / 1024 / 1024 * 2  # ~2 секунды на МБ
-                    if estimated_total < 60:
-                        estimated_total = 60  # минимум 60 секунд
+                    # Оцениваем примерное время распознавания в зависимости от размера файла или длительности
+                    estimated_total = max(audio_duration_seconds * 0.5, 60)  # примерно половина от длительности аудио, но минимум 60 сек
                     
                     percent = 52 + min(int((elapsed / estimated_total) * 38), 37)  # от 52% до 89%
                     if percent > last_percent:
@@ -491,38 +503,10 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
             
             response = operation.result(timeout=300)  # Увеличиваем таймаут для больших файлов
         else:
-            # Для локальных файлов определяем метод по длительности
-            # Примерная оценка для 16кГц, 16бит, моно
-            audio_duration_seconds = len(content) / 32000 if 'content' in locals() else 60
-            
-            if audio_duration_seconds > 60:
-                update_status(50, f"Запуск асинхронного распознавания для длинного аудио ({audio_duration_seconds:.1f} сек.)")
-                operation = client.long_running_recognize(config=config, audio=audio)
-                
-                update_status(52, "Ожидание завершения распознавания...")
-                start_time = time.time()
-                done = False
-                last_percent = 52
-                
-                while not done:
-                    if operation.done():
-                        done = True
-                        update_status(90, "Распознавание завершено")
-                    else:
-                        elapsed = time.time() - start_time
-                        # от 52% до 89%
-                        percent = 52 + min(int((elapsed / audio_duration_seconds) * 38), 37)
-                        if percent > last_percent:
-                            update_status(percent, f"Распознавание: прошло {int(elapsed)} сек.")
-                            last_percent = percent
-                        
-                        time.sleep(2)  # Проверяем каждые 2 секунды
-                
-                response = operation.result(timeout=180)  # Увеличиваем таймаут
-            else:
-                update_status(50, "Запуск синхронного распознавания для короткого аудио")
-                response = client.recognize(config=config, audio=audio)
-                update_status(90, "Распознавание завершено")
+            # Для коротких локальных файлов используем синхронное распознавание
+            update_status(50, "Запуск синхронного распознавания для короткого аудио")
+            response = client.recognize(config=config, audio=audio)
+            update_status(90, "Распознавание завершено")
         
         # Проверяем, есть ли результаты распознавания
         if not response.results:
@@ -622,7 +606,7 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
                         # Определяем говорящего по очереди (имитация)
                         if i > 0 and len(result) > 0:
                             current_speaker = 2 if current_speaker == 1 else 1
-                            result.append({
+                        result.append({
                             "speaker": f"Говорящий {current_speaker}",
                             "text": alternative.transcript,
                             "start_time": format_time(start_time)
@@ -673,7 +657,7 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
         return f"Ошибка при транскрибировании: {str(e)}"
     finally:
         # Используем Cloud Storage, НЕ удаляем файл
-        if file_size > 10 * 1024 * 1024 and 'gcs_uri' in locals():
+        if 'gcs_uri' in locals():
             update_status(100, f"Аудиофайл сохранен в Cloud Storage: {gcs_uri}")
         
         # Удаляем временный конвертированный файл, если он создавался

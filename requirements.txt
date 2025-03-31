@@ -2,7 +2,6 @@
 
 flask==2.3.3
 werkzeug==2.3.7
-google-cloud-speech==2.21.0
 google-cloud-storage==2.10.0
 google-auth==2.23.0
 yt-dlp==2023.11.16  # обновленная версия
@@ -13,3 +12,6 @@ pydub==0.25.1
 langdetect==1.0.9
 python-magic==0.4.27
 requests==2.28.1
+google-cloud-aiplatform>=1.25.0
+google-cloud-speech>=2.21.0
+protobuf>=4.21.6
