@@ -6,13 +6,8 @@ import time
 import datetime
 import threading
 import re
-import base64
 from flask import Flask, render_template, request, jsonify, send_file, url_for
 from werkzeug.utils import secure_filename
-from google.cloud import speech
-from google.cloud.speech import RecognitionConfig
-from google.oauth2 import service_account
-from google.cloud import storage
 import yt_dlp
 import docx
 from docx.shared import Pt, RGBColor
@@ -21,12 +16,6 @@ import traceback
 from config import config as app_config
 import magic
 from langdetect import detect, LangDetectException
-
-from google.cloud import aiplatform
-from google.cloud.aiplatform.gapic import PredictionServiceClient
-from google.cloud.aiplatform_v1.services.prediction_service.client import PredictionServiceClient
-from google.protobuf import json_format
-from google.protobuf.struct_pb2 import Value
 from pydub import AudioSegment
 from pydub.silence import detect_silence
 
@@ -40,8 +29,8 @@ app.config.from_object(config)
 app.config['SECRET_KEY'] = config.SECRET_KEY
 app.config['UPLOAD_FOLDER'] = config.UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = config.MAX_CONTENT_LENGTH
-app.config['CREDENTIALS_PATH'] = config.CREDENTIALS_PATH
 app.config['SESSION_EXPIRY'] = config.SESSION_EXPIRY
+app.config['WHISPER_SERVICE_URL'] = config.WHISPER_SERVICE_URL
 
 # Создание папки для загрузок, если её нет
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -65,29 +54,11 @@ def generate_session_id():
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def get_credentials():
-    """Получение учетных данных Google Cloud из JSON-файла."""
-    try:
-        return service_account.Credentials.from_service_account_file(app.config['CREDENTIALS_PATH'])
-    except Exception as e:
-        print(f"Ошибка при получении учетных данных: {e}")
-        return None
-
 def format_time(seconds):
     """Форматирование времени в формат ММ:СС"""
     minutes = int(seconds) // 60
     seconds = int(seconds) % 60
     return f"{minutes:02d}:{seconds:02d}"
-
-def get_audio_sample_rate(file_path):
-    """Определение частоты дискретизации аудиофайла"""
-    try:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(file_path)
-        return audio.frame_rate
-    except Exception as e:
-        print(f"Ошибка при определении частоты дискретизации: {e}")
-        return None  # Вернем None и позволим API определить частоту самостоятельно
 
 def check_and_convert_audio_channels(file_path, status_callback=None):
     """
@@ -350,7 +321,6 @@ def detect_audio_language(file_path):
         print(f"Ошибка при определении языка аудио: {e}")
         return 'ru-RU'  # В случае ошибки также используем русский
 
-
 def split_audio_on_silence(file_path, min_silence_len=700, silence_thresh=-40, 
                          min_segment_len=45000, max_segment_len=55000,
                          pause_search_start=50000, pause_search_end=58000):
@@ -402,273 +372,11 @@ def split_audio_on_silence(file_path, min_silence_len=700, silence_thresh=-40,
 
     return segments
 
+# Импорт whisper_client для взаимодействия с новым сервисом
+from whisper_client import transcribe_with_whisper_api
 
-def transcribe_segment(segment_path, language_code, enable_timestamps):
-    """
-    Транскрибирует отдельный сегмент аудио используя Chirp 2
-    """
-    try:
-        from google.cloud.speech_v2 import SpeechClient
-        from google.cloud.speech_v2.types import cloud_speech
-
-        client = SpeechClient(
-            credentials=get_credentials(),
-            client_options={"api_endpoint": "us-central1-speech.googleapis.com"}
-        )
-
-        # Настройка конфигурации для Chirp 2
-        features = cloud_speech.RecognitionFeatures(
-            enable_word_time_offsets=enable_timestamps,
-            enable_word_confidence=True,
-            enable_automatic_punctuation=True
-        )
-
-        config = cloud_speech.RecognitionConfig(
-            auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
-            language_codes=[language_code],
-            model="chirp_2",
-            features=features
-        )
-
-        # Читаем файл и создаем запрос
-        with open(segment_path, 'rb') as audio_file:
-            content = audio_file.read()
-
-        # Используем project ID из конфигурации
-        project_id = os.environ.get('VERTEX_AI_PROJECT', app.config.get('VERTEX_AI_PROJECT'))
-        
-        request = cloud_speech.RecognizeRequest(
-            recognizer=f"projects/{project_id}/locations/us-central1/recognizers/_",
-            config=config,
-            content=content
-        )
-
-        # Выполнение распознавания
-        response = client.recognize(request=request)
-
-        # Обработка результатов
-        if enable_timestamps:
-            results = []
-            for result in response.results:
-                if result.alternatives:
-                    for word in result.alternatives[0].words:
-                        results.append({
-                            'text': word.word,
-                            'start_time': word.start_time.total_seconds(),
-                            'speaker': 'Говорящий 1'
-                        })
-            return results
-        else:
-            transcript = ""
-            for result in response.results:
-                if result.alternatives:
-                    transcript += result.alternatives[0].transcript + " "
-            return transcript.strip()
-
-    except Exception as e:
-        print(f"Ошибка при транскрибировании сегмента: {e}")
-        raise
-
-def process_audio_segments(audio_file, segments, language_code, enable_timestamps, update_status):
-    """
-    Обрабатывает аудио сегменты и объединяет результаты.
-    """
-    results = []
-    audio = AudioSegment.from_file(audio_file)
-    
-    for i, (start_ms, end_ms) in enumerate(segments):
-        try:
-            # Извлекаем сегмент
-            segment = audio[start_ms:end_ms]
-            segment_path = f"/tmp/segment_{i}.wav"
-            
-            # Экспортируем сегмент
-            segment.export(segment_path, format="wav", 
-                         parameters=["-ac", "1", "-ar", "16000"])
-            
-            # Обновляем статус
-            progress = 50 + (40 * i // len(segments))
-            update_status(progress, f"Обработка сегмента {i+1} из {len(segments)}")
-            
-            # Транскрибируем сегмент
-            transcript = transcribe_segment(segment_path, language_code, enable_timestamps)
-            
-            if transcript:
-                if enable_timestamps and isinstance(transcript, list):
-                    # Корректируем время с учетом смещения сегмента
-                    for item in transcript:
-                        total_seconds = item['start_time'] + (start_ms / 1000)
-                        item['start_time'] = format_time(total_seconds)
-                    results.extend(transcript)
-                else:
-                    results.append(transcript)
-        
-        finally:
-            # Очищаем временные файлы
-            if os.path.exists(segment_path):
-                os.remove(segment_path)
-    
-    # Объединяем результаты
-    if enable_timestamps:
-        # Группируем слова в предложения
-        grouped_results = []
-        if results:
-            current_sentence = {
-                'text': '',
-                'start_time': format_time(results[0].get('start_time', 0)),
-                'speaker': 'Говорящий 1'
-            }
-            
-            for word_info in results:
-                current_sentence['text'] += ' ' + word_info['text']
-                if word_info['text'].endswith(('.', '!', '?')):
-                    current_sentence['text'] = current_sentence['text'].strip()
-                    grouped_results.append(current_sentence)
-                    current_sentence = {
-                        'text': '',
-                        'start_time': word_info['start_time'],
-                        'speaker': 'Говорящий 1'
-                    }
-            
-            # Добавляем последнее предложение
-            if current_sentence['text']:
-                current_sentence['text'] = current_sentence['text'].strip()
-                grouped_results.append(current_sentence)
-                
-        return grouped_results
-    else:
-        return ' '.join(results)
-
-
-def transcribe_with_chirp2(file_path, language_code, enable_timestamps, update_status):
-    """
-    Транскрибирование аудио с использованием модели Chirp 2
-    """
-    try:
-        from google.cloud.speech_v2 import SpeechClient
-        from google.cloud.speech_v2.types import cloud_speech
-        
-        credentials = get_credentials()
-        if not credentials:
-            raise Exception("Ошибка авторизации в Google Cloud")
-
-        client = SpeechClient(
-            credentials=credentials,
-            client_options={"api_endpoint": "us-central1-speech.googleapis.com"}
-        )
-
-        # Конфигурация для Chirp 2
-        features = cloud_speech.RecognitionFeatures(
-            enable_word_time_offsets=enable_timestamps,
-            enable_word_confidence=True,
-            enable_automatic_punctuation=True,
-            enable_spoken_punctuation=False,
-            enable_spoken_emojis=False
-        )
-
-        config = cloud_speech.RecognitionConfig(
-            auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
-            language_codes=[language_code],
-            model="chirp_2",
-            features=features
-        )
-
-        # Разделение на сегменты по 60 секунд для Chirp 2
-        audio = AudioSegment.from_file(file_path)
-        segment_length = 58000  # 58 секунд в миллисекундах
-        segments = []
-        
-        for start in range(0, len(audio), segment_length):
-            end = min(start + segment_length, len(audio))
-            segments.append((start, end))
-
-        all_results = []
-        for i, (start_ms, end_ms) in enumerate(segments):
-            update_status(50 + (40 * i // len(segments)), 
-                        f"Обработка сегмента {i+1} из {len(segments)} с помощью Chirp 2")
-            
-            # Извлекаем и сохраняем сегмент
-            segment = audio[start_ms:end_ms]
-            segment_path = f"/tmp/segment_{i}.wav"
-            segment.export(segment_path, format="wav", 
-                         parameters=["-ac", "1", "-ar", "16000"])
-
-            # Отправляем запрос к API
-            with open(segment_path, 'rb') as audio_file:
-                content = audio_file.read()
-
-            request = cloud_speech.RecognizeRequest(
-                recognizer=f"projects/{os.environ.get('VERTEX_AI_PROJECT')}/locations/us-central1/recognizers/_",
-                config=config,
-                content=content
-            )
-
-            try:
-                response = client.recognize(request=request)
-
-                # Обработка результатов
-                if enable_timestamps:
-                    for result in response.results:
-                        if result.alternatives:
-                            words = result.alternatives[0].words
-                            for word in words:
-                                time_offset = (word.start_time.total_seconds() + 
-                                            (start_ms / 1000))
-                                all_results.append({
-                                    'text': word.word,
-                                    'start_time': format_time(time_offset),
-                                    'speaker': 'Говорящий 1'  # Базовая метка говорящего
-                                })
-                else:
-                    for result in response.results:
-                        if result.alternatives:
-                            all_results.append(result.alternatives[0].transcript)
-
-            except Exception as e:
-                print(f"Ошибка при обработке сегмента {i}: {e}")
-                raise
-
-            finally:
-                # Удаляем временный файл сегмента
-                if os.path.exists(segment_path):
-                    os.remove(segment_path)
-
-        # Объединяем результаты
-        if enable_timestamps:
-            # Группируем слова в предложения
-            grouped_results = []
-            current_sentence = {
-                'text': '',
-                'start_time': all_results[0]['start_time'] if all_results else '00:00',
-                'speaker': 'Говорящий 1'
-            }
-            
-            for word_info in all_results:
-                current_sentence['text'] += ' ' + word_info['text']
-                if word_info['text'].endswith(('.', '!', '?')):
-                    current_sentence['text'] = current_sentence['text'].strip()
-                    grouped_results.append(current_sentence)
-                    current_sentence = {
-                        'text': '',
-                        'start_time': word_info['start_time'],
-                        'speaker': 'Говорящий 1'
-                    }
-            
-            # Добавляем последнее предложение, если оно есть
-            if current_sentence['text']:
-                current_sentence['text'] = current_sentence['text'].strip()
-                grouped_results.append(current_sentence)
-                
-            return grouped_results
-        else:
-            return ' '.join(all_results)
-
-    except Exception as e:
-        print(f"Ошибка при использовании Chirp 2: {e}")
-        raise
-
-def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None, use_vertex_ai=False):
-    """Основная функция транскрибирования с приоритетом Chirp 2"""
+def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None):
+    """Переработанная функция транскрибирования с использованием нового Whisper API"""
     def update_status(percent, message):
         print(f"[Прогресс] {percent}%: {message}")
         if status_callback:
@@ -680,490 +388,273 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
         file_path = check_and_convert_audio_channels(file_path, update_status)
         prepared_file_path = prepare_audio_for_transcription(file_path, update_status)
 
-        # Сначала пробуем использовать Chirp 2
-        update_status(30, "Попытка транскрибирования с помощью Chirp 2...")
-        try:
-            return transcribe_with_chirp2(
-                prepared_file_path, 
-                language_code, 
-                enable_timestamps, 
-                update_status
-            )
-        except Exception as e:
-            print(f"Ошибка Chirp 2: {e}")
-            update_status(40, "Переключение на стандартный API...")
-            
-            # Если Chirp 2 не сработал, используем стандартный API
-            return _transcribe_with_standard_api(
-                file_path,
-                prepared_file_path,
-                None,  # gcs_uri
-                language_code,
-                enable_timestamps,
-                get_credentials(),
-                update_status,
-                len(AudioSegment.from_file(prepared_file_path)) / 1000
-            )
+        # Проверка на наличие речи
+        has_speech, speech_message = check_audio_for_speech(prepared_file_path, update_status)
+        if not has_speech:
+            return speech_message
 
-    except Exception as e:
-        print(f"Ошибка при транскрибировании: {e}")
-        traceback.print_exc()
-        return f"Ошибка при транскрибировании: {str(e)}"
-    
-
-def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None, use_vertex_ai=False):
-    """Транскрибирование аудиофайла с интеллектуальной нарезкой."""
-
-    def update_status(percent, message):
-        print(f"[Прогресс] {percent}%: {message}")
-        if status_callback:
-            status_callback(percent, message)
-
-    credentials = get_credentials()
-    if not credentials:
-        return "Ошибка авторизации в Google Cloud."
-
-    file_path = check_and_convert_audio_channels(file_path, update_status)
-    prepared_file_path = prepare_audio_for_transcription(file_path, update_status)
-    update_status(10, "Аудиофайл преобразован в оптимальный формат")
-
-    has_speech, speech_message = check_audio_for_speech(prepared_file_path, update_status)
-    if not has_speech:
-        return speech_message
-
-    from google.cloud.speech_v2 import SpeechClient
-    from google.cloud.speech_v2.types import cloud_speech
-
-    client = SpeechClient(
-        credentials=credentials,
-        client_options={"api_endpoint": "us-central1-speech.googleapis.com"}
-    )
-
-    try:
-        audio_segment = AudioSegment.from_file(prepared_file_path)
-        audio_duration_seconds = len(audio_segment) / 1000
-        update_status(18, f"Определена длительность аудио: {audio_duration_seconds:.1f} секунд")
-    except Exception as e:
-        print(f"Ошибка при определении длительности: {e}")
-        audio_duration_seconds = 61
-        update_status(18, "Не удалось определить длительность. Предполагаем, что файл длинный.")
-
-    file_size = os.path.getsize(prepared_file_path)
-    file_name = os.path.basename(prepared_file_path)
-
-    update_status(20, f"Подготовка файла {file_name} (размер: {file_size / 1024 / 1024:.2f} МБ)")
-
-    gcs_uri = None
-    if file_size > 10 * 1024 * 1024 or audio_duration_seconds > 60:
-        update_status(25, f"Файл требует загрузки в Cloud Storage (размер или длительность)")
-
-        gcs_bucket_name = "audio_transscript"
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        gcs_file_name = f"audio/saved/{timestamp}_{file_name}"
-
-        try:
-            update_status(30, "Загрузка файла в Cloud Storage...")
-            storage_client = storage.Client(credentials=credentials)
-            bucket = storage_client.bucket(gcs_bucket_name)
-            blob = bucket.blob(gcs_file_name)
-
-            blob.upload_from_filename(prepared_file_path)
-            update_status(40, "Загрузка файла в Cloud Storage завершена")
-
-            gcs_uri = f"gs://{gcs_bucket_name}/{gcs_file_name}"
-            update_status(42, f"Файл загружен как: {gcs_uri}")
-
-        except Exception as e:
-            print(f"Ошибка при загрузке в Cloud Storage: {e}")
-            traceback.print_exc()
-            return f"Ошибка при загрузке файла в Cloud Storage: {str(e)}"
-    else:
-        update_status(25, "Файл подходит для прямой отправки в API")
-
-    try:
-        update_status(45, "Настройка параметров распознавания с Chirp 2")
-        update_status(46, f"Используем выбранный язык: {language_code}")
-
-        features = cloud_speech.RecognitionFeatures(
-            enable_word_time_offsets=enable_timestamps,
-            enable_word_confidence=True,
-            enable_automatic_punctuation=True,
-            enable_spoken_punctuation=False,
-            enable_spoken_emojis=False
-        )
-
-        config = cloud_speech.RecognitionConfig(
-            auto_decoding_config=cloud_speech.AutoDetectDecodingConfig(),
-            language_codes=[language_code],
-            model="chirp_2",
-            features=features
-        )
-
-        if enable_timestamps:
-            update_status(47, "Настроены таймкоды, но диаризация говорящих недоступна в Chirp 2")
-
-        # **Интеллектуальная нарезка аудио**
-        speech_ranges = split_audio_on_silence(prepared_file_path, min_segment_len=50000, max_segment_len=58000, pause_search_start=50000, pause_search_end=58000)
-        all_transcripts = []
-        total_segments = len(speech_ranges)
+        # Транскрипция через новый Whisper API
+        update_status(30, "Отправка файла на транскрипцию (Whisper Russian)...")
         
-        for i, (start_ms, end_ms) in enumerate(speech_ranges):
-            segment_audio = audio_segment[start_ms:end_ms]
-            segment_path = f"/tmp/segment_{i}.wav"
-            segment_audio.export(segment_path, format="wav")
-
-            if gcs_uri:
-                # Транскрибируем из Cloud Storage (но каждый сегмент отдельно)
-                request = cloud_speech.RecognizeRequest(
-                    recognizer=f"projects/{app.config['VERTEX_AI_PROJECT']}/locations/us-central1/recognizers/_",
-                    config=config,
-                    uri=gcs_uri
-                )
-            else:
-                with open(segment_path, 'rb') as audio_file:
-                    content = audio_file.read()
-                request = cloud_speech.RecognizeRequest(
-                    recognizer=f"projects/{app.config['VERTEX_AI_PROJECT']}/locations/us-central1/recognizers/_",
-                    config=config,
-                    content=content
-                )
-
-            update_status(50 + int(40 * i / total_segments), f"Транскрибирование сегмента {i + 1} из {total_segments}")
-            response = client.recognize(request=request)
-
-            segment_transcript = ""
-            for result in response.results:
-                if result.alternatives:
-                    segment_transcript += result.alternatives[0].transcript + " "
-
-            os.remove(segment_path)  # Удаляем временный файл сегмента
-            all_transcripts.append({
-                'start_ms': start_ms,
-                'end_ms': end_ms,
-                'transcript': segment_transcript.strip()
-            })
-
-        update_status(90, "Распознавание завершено")
-
-        # Склейка и корректировка таймкодов
-        final_transcript = ""
-        if enable_timestamps:
-            final_result = []
-            current_speaker = 1
-            global_offset = 0  # Смещение для таймкодов
-
-            for i, segment in enumerate(all_transcripts):
-                segment_offset = segment['start_ms'] / 1000  # Смещение в секундах
-                words = segment['transcript'].split()
-                
-                # Имитация speaker_tag (заглушка)
-                for word in words:
-                  final_result.append({
-                      'speaker': f"Участник {current_speaker}",
-                      'text': word,
-                      'start_time': format_time(global_offset)
-                  })
-                  global_offset += 0.3  # Примерное время на слово
-                
-                if i > 0:
-                  current_speaker = 2 if current_speaker == 1 else 1
-                final_transcript += segment['transcript'] + " "
-            
-            final_transcript = final_transcript.strip()
-            words_count = len(final_transcript.split())
-            update_status(98, f"Обработка завершена: получено {words_count} слов")
-            
-            if words_count == 0:
-                return "Речь не распознана. Возможные причины: тишина в аудио, шум, несоответствие языка."
-                
-            return final_result
-        else:
-            for segment in all_transcripts:
-                final_transcript += segment['transcript'] + " "
-            
-            final_transcript = final_transcript.strip()
-            words_count = len(final_transcript.split())
-            update_status(98, f"Обработка завершена: получено {words_count} слов")
-            
-            if words_count == 0:
-                return "Речь не распознана. Возможные причины: тишина в аудио, шум, несоответствие языка."
-                
-            return final_transcript
-            
-
-    except Exception as e:
-        print(f"Ошибка при транскрибировании: {e}")
-        traceback.print_exc()
-        update_status(40, f"Ошибка: {str(e)}. Переключение на стандартный API.")
-        return _transcribe_with_standard_api(file_path, prepared_file_path, gcs_uri,
-                                        language_code, enable_timestamps, credentials,
-                                        update_status, audio_duration_seconds)
-
-    finally:
-        if 'gcs_uri' in locals() and gcs_uri:
-            update_status(100, f"Аудиофайл сохранен в Cloud Storage: {gcs_uri}")
+        transcript = transcribe_with_whisper_api(
+            prepared_file_path,
+            language_code=language_code,
+            enable_timestamps=enable_timestamps,
+            status_callback=update_status
+        )
+        
+        # Очистка временных файлов
         if prepared_file_path != file_path and os.path.exists(prepared_file_path):
             try:
                 os.remove(prepared_file_path)
             except Exception as e:
                 print(f"Не удалось удалить временный файл: {e}")
+        
+        # Если получили массив с таймкодами, обрабатываем имена говорящих
+        if enable_timestamps and isinstance(transcript, list):
+            transcript = detect_speaker_names(transcript)
 
+        return transcript
 
-# Вспомогательная функция для стандартного Speech API
-def _transcribe_with_standard_api(file_path, prepared_file_path, gcs_uri, language_code, 
-                               enable_timestamps, credentials, update_status, audio_duration_seconds):
-    """Функция для транскрибирования аудио с помощью стандартного Speech API."""
-    client = speech.SpeechClient(credentials=credentials)
-    
-    # Подготавливаем аудио данные
-    if gcs_uri:
-        audio = speech.RecognitionAudio(uri=gcs_uri)
-    else:
-        # Если файл небольшой, используем прямую отправку
-        with open(prepared_file_path, 'rb') as audio_file:
-            content = audio_file.read()
-        audio = speech.RecognitionAudio(content=content)
-    
-    # Базовая конфигурация
-    config = speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=16000,
-        language_code=language_code,
-        enable_automatic_punctuation=True,
-        audio_channel_count=1,
-        use_enhanced=True,
-        model="default",
-        max_alternatives=1
-    )
-    
-    # Добавление таймингов если необходимо
-    if enable_timestamps:
-        config.enable_word_time_offsets = True
-        try:
-            diarization_config = speech.SpeakerDiarizationConfig(
-                enable_speaker_diarization=True,
-                min_speaker_count=2,
-                max_speaker_count=10,
-            )
-            config.diarization_config = diarization_config
-        except Exception as e:
-            print(f"Ошибка при настройке диаризации: {e}")
-    
-    try:
-        # Определяем, используется ли GCS
-        is_gcs_used = gcs_uri is not None
-        
-        # Для файлов в Cloud Storage или длинных файлов используем асинхронное распознавание
-        if is_gcs_used or audio_duration_seconds > 60:
-            update_status(50, "Запуск асинхронного распознавания (стандартный API)")
-            operation = client.long_running_recognize(config=config, audio=audio)
-            
-            update_status(52, "Ожидание завершения распознавания...")
-            
-            # Отслеживаем прогресс распознавания
-            start_time = time.time()
-            done = False
-            last_percent = 52
-            
-            while not done:
-                if operation.done():
-                    done = True
-                    update_status(90, "Распознавание завершено")
-                else:
-                    elapsed = time.time() - start_time
-                    # Оцениваем примерное время распознавания
-                    estimated_total = max(audio_duration_seconds * 0.5, 60)
-                    
-                    percent = 52 + min(int((elapsed / estimated_total) * 38), 37)
-                    if percent > last_percent:
-                        update_status(percent, f"Распознавание: прошло {int(elapsed)} сек.")
-                        last_percent = percent
-                    
-                    time.sleep(5)
-            
-            response = operation.result(timeout=300)
-        else:
-            # Для коротких локальных файлов используем синхронное распознавание
-            update_status(50, "Запуск синхронного распознавания для короткого аудио")
-            response = client.recognize(config=config, audio=audio)
-            update_status(90, "Распознавание завершено")
-        
-        # Проверяем, есть ли результаты распознавания
-        if not response.results:
-            return "Речь не распознана. Возможные причины: тишина в аудио, шум, несоответствие языка."
-        
-        update_status(95, "Обработка результатов распознавания")
-        
-        # Обработка результатов
-        if enable_timestamps:
-            # Вариант с таймингами
-            result = []
-            current_speaker = 1
-            
-            for i, result_item in enumerate(response.results):
-                if not result_item.alternatives:
-                    continue
-                    
-                alternative = result_item.alternatives[0]
-                
-                # Проверка наличия информации о говорящих
-                if hasattr(result_item, 'alternatives') and hasattr(alternative, 'words') and len(alternative.words) > 0:
-                    # Проверяем наличие speaker_tag в словах
-                    has_speaker_tags = hasattr(alternative.words[0], 'speaker_tag')
-                    
-                    if has_speaker_tags:
-                        # Группировка слов по говорящим
-                        current_speaker = None
-                        current_text = ""
-                        current_start_time = 0
-                        speaker_segments = []
-                        
-                        for word in alternative.words:
-                            if current_speaker is None:
-                                current_speaker = word.speaker_tag
-                                current_text = word.word + " "
-                                current_start_time = word.start_time.total_seconds()
-                            elif word.speaker_tag != current_speaker:
-                                # Новый говорящий - сохраняем предыдущий сегмент
-                                speaker_segments.append({
-                                    "speaker": f"Участник {current_speaker}",
-                                    "text": current_text.strip(),
-                                    "start_time": format_time(current_start_time)
-                                })
-                                
-                                current_speaker = word.speaker_tag
-                                current_text = word.word + " "
-                                current_start_time = word.start_time.total_seconds()
-                            else:
-                                current_text += word.word + " "
-                        
-                        # Добавляем последний сегмент
-                        if current_text:
-                            speaker_segments.append({
-                                "speaker": f"Участник {current_speaker}",
-                                "text": current_text.strip(),
-                                "start_time": format_time(current_start_time)
-                            })
-                            
-                        result.extend(speaker_segments)
-                    else:
-                        # Без speaker_tag, но с таймингами слов
-                        start_time = 0
-                        if alternative.words:
-                            start_time = alternative.words[0].start_time.total_seconds()
-                        
-                        # Определяем говорящего по очереди (имитация)
-                        if i > 0 and len(result) > 0:
-                            current_speaker = 2 if current_speaker == 1 else 1
-                        result.append({
-                            "speaker": f"Участник {current_speaker}",
-                            "text": alternative.transcript,
-                            "start_time": format_time(start_time)
-                        })
-                else:
-                    # Без информации о словах и временных метках
-                    if i > 0 and len(result) > 0:
-                        current_speaker = 2 if current_speaker == 1 else 1
-                    
-                    result.append({
-                        "speaker": f"Участник {current_speaker}",
-                        "text": alternative.transcript,
-                        "start_time": "00:00"
-                    })
-            
-            segments_count = len(result)
-            update_status(98, f"Обработка завершена: получено {segments_count} сегментов с таймингами")
-            
-            # Если не получено сегментов, возвращаем простой текст
-            if segments_count == 0:
-                transcript = ""
-                for res in response.results:
-                    transcript += res.alternatives[0].transcript + " "
-                return transcript.strip()
-            
-            # Попытка определить имена говорящих из контекста
-            result = detect_speaker_names(result)
-            
-            return result
-        else:
-            # Обычная транскрипция без таймингов
-            transcript = ""
-            for result in response.results:
-                transcript += result.alternatives[0].transcript + " "
-                
-            transcript = transcript.strip()
-            words_count = len(transcript.split())
-            update_status(98, f"Обработка завершена: получено {words_count} слов")
-            
-            if words_count == 0:
-                return "Речь не распознана. Возможные причины: тишина в аудио, шум, несоответствие языка."
-                
-            return transcript
-            
     except Exception as e:
-        print(f"Ошибка при транскрибировании со стандартным API: {e}")
+        print(f"Ошибка при транскрибировании: {e}")
         traceback.print_exc()
         return f"Ошибка при транскрибировании: {str(e)}"
 
-# def transcribe_audio_vertex_ai(file_path, language_code='ru-RU', enable_timestamps=False, status_callback=None):
-#     try:
-#         # Инициализация клиента Vertex AI
-#         aiplatform.init(
-#             project=app.config['VERTEX_AI_PROJECT'], 
-#             location=app.config['VERTEX_AI_LOCATION']
-#         )
-        
-#         # Подготовка аудиофайла (конвертация в нужный формат)
-#         prepared_file = prepare_audio_for_transcription(file_path, status_callback)
-        
-#         # Кодирование аудио в base64
-#         with open(prepared_file, 'rb') as audio_file:
-#             audio_content = base64.b64encode(audio_file.read()).decode('utf-8')
-        
-#         # Формирование запроса к Vertex AI
-#         prediction_client = PredictionServiceClient()
-#         endpoint = f"projects/{app.config['VERTEX_AI_PROJECT']}/locations/{app.config['VERTEX_AI_LOCATION']}/endpoints/speech_recognition_endpoint"
-        
-#         # Параметры запроса
-#         instances = [{
-#             'audio_content': audio_content,
-#             'config': {
-#                 'language_code': language_code,
-#                 'enable_automatic_punctuation': True,
-#                 'model': 'large_v2',  # Актуальная модель Vertex AI
-#                 'enable_speaker_diarization': enable_timestamps
-#             }
-#         }]
-        
-#         # Преобразование в совместимый формат
-#         instances_pb = [json_format.ParseDict(instance, Value()) for instance in instances]
-        
-#         # Выполнение распознавания
-#         response = prediction_client.predict(
-#             endpoint=endpoint, 
-#             instances=instances_pb
-#         )
-        
-#         # Обработка результатов
-#         transcript = response.predictions[0]['transcript']
-        
-#         if enable_timestamps:
-#             # Логика обработки результатов с таймингами
-#             speakers = response.predictions[0].get('speakers', [])
-#             result = []
-#             for segment in speakers:
-#                 result.append({
-#                     'speaker': f"Говорящий {segment['speaker_id']}",
-#                     'text': segment['text'],
-#                     'start_time': format_time(segment['start_time'])
-#                 })
-#             return result
-        
-#         return transcript
+def get_video_info(url):
+    """Получение информации о видео по ссылке"""
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': '%(title)s.%(ext)s',  # Временный шаблон имени файла
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+            'preferredquality': '192',
+        }],
+        'quiet': False,
+        'no_warnings': False,
+        'geo_bypass': True,
+        'nocheckcertificate': True,
+        'ssl_verify': False,
+        'retries': 3,
+        'progress_hooks': []
+    }
     
-#     except Exception as e:
-#         print(f"Ошибка при распознавании в Vertex AI: {e}")
-#         return str(e)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return {
+                'title': info.get('title', 'Неизвестное видео'),
+                'uploader': info.get('uploader', 'Неизвестный автор'),
+                'duration': info.get('duration', 0),
+                'upload_date': info.get('upload_date', ''),
+                'thumbnail': info.get('thumbnail', '')
+            }
+    except Exception as e:
+        print(f"Ошибка при получении информации о видео: {e}")
+        return None
+
+def download_from_youtube(url, status_callback=None):
+    """Загрузка аудио из YouTube-видео."""
+    if status_callback:
+        status_callback(10, "Подготовка к загрузке видео...")
+    
+    # Получаем информацию о видео
+    video_info = get_video_info(url)
+    if video_info:
+        if status_callback:
+            status_callback(12, f"Найдено видео: {video_info['title']}")
+    
+    temp_dir = tempfile.gettempdir()
+    output_file = os.path.join(temp_dir, f"{uuid.uuid4()}.%(ext)s")
+    
+    # Настройка yt-dlp без некорректного постпроцессора
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_file,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+            'preferredquality': '192',
+        }],
+        'quiet': False,
+        'no_warnings': False,
+        'geo_bypass': True,
+        'nocheckcertificate': True,
+        'ssl_verify': False,
+        'retries': 3, 
+        'progress_hooks': [lambda d: status_callback(
+            min(10 + int(d.get('downloaded_percent', 0) * 0.3), 40), 
+            f"Загрузка видео: {d.get('downloaded_percent', 0):.1f}%"
+        ) if status_callback and 'downloaded_percent' in d else None],
+    }
+    
+    try:
+        if status_callback:
+            status_callback(15, "Загрузка видео...")
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            downloaded_file = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.wav'
+            
+            if status_callback:
+                status_callback(40, "Видео загружено и преобразовано в аудио")
+            
+            # Ручное преобразование в моно с помощью ffmpeg
+            try:
+                import subprocess
+                
+                if status_callback:
+                    status_callback(41, "Преобразование аудио в монофонический формат...")
+                
+                mono_file = downloaded_file + '.mono.wav'
+                cmd = [
+                    'ffmpeg', '-y', '-i', downloaded_file, 
+                    '-ac', '1', '-ar', '16000', 
+                    '-vn', '-acodec', 'pcm_s16le', mono_file
+                ]
+                
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                
+                # Проверяем, что файл создан
+                if os.path.exists(mono_file):
+                    os.replace(mono_file, downloaded_file)
+                    if status_callback:
+                        status_callback(42, "Аудио успешно преобразовано в моно формат")
+                else:
+                    if status_callback:
+                        status_callback(42, "Не удалось преобразовать в моно. Используем исходный файл.")
+            except Exception as e:
+                print(f"Ошибка при преобразовании в моно: {e}")
+                if status_callback:
+                    status_callback(42, f"Предупреждение: {str(e)}. Попытка использовать pydub...")
+                
+                # Запасной вариант с использованием pydub
+                try:
+                    from pydub import AudioSegment
+                    audio = AudioSegment.from_wav(downloaded_file)
+                    audio = audio.set_channels(1)
+                    audio = audio.set_frame_rate(16000)
+                    audio.export(downloaded_file, format="wav")
+                    if status_callback:
+                        status_callback(43, "Аудио преобразовано в моно формат с помощью pydub")
+                except Exception as e2:
+                    print(f"Ошибка при использовании pydub: {e2}")
+                    if status_callback:
+                        status_callback(43, "Не удалось преобразовать аудио в моно. Продолжаем с исходным файлом.")
+            
+            return downloaded_file, video_info
+    except Exception as e:
+        print(f"Ошибка при загрузке видео: {e}")
+        traceback.print_exc()
+        if status_callback:
+            status_callback(0, f"Ошибка при загрузке видео: {str(e)}")
+        return None, None
+
+def create_docx(transcript, filename="transcript", with_timestamps=False, video_info=None):
+    """Создание DOCX файла с транскрипцией."""
+    doc = docx.Document()
+    
+    # Стилизация заголовка
+    title = doc.add_heading("Транскрипция аудио", 0)
+    title_paragraph = title.paragraph_format
+    title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Добавление информации о видео, если она есть
+    if video_info:
+        video_paragraph = doc.add_paragraph()
+        video_paragraph.add_run("Информация о видео:\n").bold = True
+        video_paragraph.add_run(f"Название: {video_info['title']}\n")
+        video_paragraph.add_run(f"Автор: {video_info['uploader']}\n")
+        
+        if video_info['duration']:
+            minutes, seconds = divmod(video_info['duration'], 60)
+            video_paragraph.add_run(f"Длительность: {minutes}:{seconds:02d}\n")
+        
+        if video_info['upload_date']:
+            upload_date = video_info['upload_date']
+            formatted_date = f"{upload_date[6:8]}.{upload_date[4:6]}.{upload_date[0:4]}"
+            video_paragraph.add_run(f"Дата публикации: {formatted_date}\n")
+    
+    # Добавление даты и времени
+    date_paragraph = doc.add_paragraph()
+    date_run = date_paragraph.add_run(f"Дата транскрипции: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+    date_run.font.size = Pt(10)
+    date_run.font.italic = True
+    date_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    
+    # Горизонтальная линия
+    doc.add_paragraph("_" * 80)
+    
+    # Добавление транскрибированного текста с красивым оформлением
+    if with_timestamps and isinstance(transcript, list):
+        # Оформление с таймингами и разными говорящими
+        for segment in transcript:
+            paragraph = doc.add_paragraph()
+            
+            # Добавление тайминга
+            time_run = paragraph.add_run(f"[{segment['start_time']}] ")
+            time_run.font.bold = True
+            time_run.font.size = Pt(10)
+            time_run.font.color.rgb = RGBColor(100, 100, 100)
+            
+            # Добавление говорящего
+            speaker_run = paragraph.add_run(f"{segment['speaker']}: ")
+            speaker_run.font.bold = True
+            speaker_run.font.color.rgb = RGBColor(0, 0, 150)
+            
+            # Добавление текста
+            text_run = paragraph.add_run(segment['text'])
+            text_run.font.size = Pt(11)
+            
+            # Добавление пустой строки между говорящими
+            doc.add_paragraph()
+    else:
+        # Обычный текст без разделения на говорящих
+        paragraph = doc.add_paragraph()
+        text_run = paragraph.add_run(transcript)
+        text_run.font.size = Pt(11)
+    
+    # Добавление нижнего колонтитула
+    footer = doc.add_paragraph()
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer_run = footer.add_run("Создано с помощью сервиса транскрипции аудио (Whisper Russian)")
+    footer_run.font.size = Pt(8)
+    footer_run.font.italic = True
+    
+    # Сохранение во временный файл
+    temp_file = os.path.join(tempfile.gettempdir(), 'transcripts', f"{filename}.docx")
+    doc.save(temp_file)
+    
+    return temp_file
+
+def save_transcript_to_session(session_id, transcript, docx_path, with_timestamps=False, video_info=None, language_code='ru-RU'):
+    """Сохранение транскрипции в сессию с информацией о языке"""
+    # Формируем уникальный URL для доступа к сессии
+    share_url = f"/share/{session_id}"
+    
+    sessions[session_id] = {
+        'created_at': datetime.datetime.now().timestamp(),
+        'transcript': transcript,
+        'docx_path': docx_path,
+        'with_timestamps': with_timestamps,
+        'video_info': video_info,
+        'share_url': share_url,
+        'language': language_code  # Добавляем информацию о языке
+    }
+    
+    # Очистка старых сессий (старше 24 часов)
+    current_time = datetime.datetime.now().timestamp()
+    sessions_to_delete = []
+    
+    for s_id, s_data in sessions.items():
+        if current_time - s_data['created_at'] > app.config['SESSION_EXPIRY']:
+            sessions_to_delete.append(s_id)
+    
+    for s_id in sessions_to_delete:
+        del sessions[s_id]
+    
+    return share_url
 
 def analyze_transcript(transcript, with_timestamps=False):
     """Расширенный анализ транскрипции с дополнительными метриками"""
@@ -1388,241 +879,29 @@ def analyze_transcript(transcript, with_timestamps=False):
             'message': f'Ошибка при анализе: {str(e)}'
         }
 
-def get_video_info(url):
-    """Получение информации о видео по ссылке"""
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': '%(title)s.%(ext)s',  # Временный шаблон имени файла
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'wav',
-            'preferredquality': '192',
-        }],
-        'quiet': False,
-        'no_warnings': False,
-        'geo_bypass': True,
-        'nocheckcertificate': True,
-        'ssl_verify': False,
-        'retries': 3,
-        'progress_hooks': []
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return {
-                'title': info.get('title', 'Неизвестное видео'),
-                'uploader': info.get('uploader', 'Неизвестный автор'),
-                'duration': info.get('duration', 0),
-                'upload_date': info.get('upload_date', ''),
-                'thumbnail': info.get('thumbnail', '')
-            }
-    except Exception as e:
-        print(f"Ошибка при получении информации о видео: {e}")
-        return None
-
-def download_from_youtube(url, status_callback=None):
-    """Загрузка аудио из YouTube-видео."""
-    if status_callback:
-        status_callback(10, "Подготовка к загрузке видео...")
-    
-    # Получаем информацию о видео
-    video_info = get_video_info(url)
-    if video_info:
-        if status_callback:
-            status_callback(12, f"Найдено видео: {video_info['title']}")
-    
-    temp_dir = tempfile.gettempdir()
-    output_file = os.path.join(temp_dir, f"{uuid.uuid4()}.%(ext)s")
-    
-    # Настройка yt-dlp без некорректного постпроцессора
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_file,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'wav',
-            'preferredquality': '192',
-        }],
-        'quiet': False,
-        'no_warnings': False,
-        'geo_bypass': True,
-        'nocheckcertificate': True,
-        'ssl_verify': False,
-        'retries': 3, 
-        'progress_hooks': [lambda d: status_callback(
-            min(10 + int(d.get('downloaded_percent', 0) * 0.3), 40), 
-            f"Загрузка видео: {d.get('downloaded_percent', 0):.1f}%"
-        ) if status_callback and 'downloaded_percent' in d else None],
-    }
-    
-    try:
-        if status_callback:
-            status_callback(15, "Загрузка видео...")
+def check_transcription_quality(transcript):
+    """
+    Проверка качества транскрипции
+    """
+    if isinstance(transcript, list):
+        # Проверка на повторы
+        unique_texts = set(segment['text'] for segment in transcript)
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            downloaded_file = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.wav'
-            
-            if status_callback:
-                status_callback(40, "Видео загружено и преобразовано в аудио")
-            
-            # Ручное преобразование в моно с помощью ffmpeg
-            try:
-                import subprocess
-                
-                if status_callback:
-                    status_callback(41, "Преобразование аудио в монофонический формат...")
-                
-                mono_file = downloaded_file + '.mono.wav'
-                cmd = [
-                    'ffmpeg', '-y', '-i', downloaded_file, 
-                    '-ac', '1', '-ar', '16000', 
-                    '-vn', '-acodec', 'pcm_s16le', mono_file
-                ]
-                
-                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
-                # Проверяем, что файл создан
-                if os.path.exists(mono_file):
-                    os.replace(mono_file, downloaded_file)
-                    if status_callback:
-                        status_callback(42, "Аудио успешно преобразовано в моно формат")
-                else:
-                    if status_callback:
-                        status_callback(42, "Не удалось преобразовать в моно. Используем исходный файл.")
-            except Exception as e:
-                print(f"Ошибка при преобразовании в моно: {e}")
-                if status_callback:
-                    status_callback(42, f"Предупреждение: {str(e)}. Попытка использовать pydub...")
-                
-                # Запасной вариант с использованием pydub
-                try:
-                    from pydub import AudioSegment
-                    audio = AudioSegment.from_wav(downloaded_file)
-                    audio = audio.set_channels(1)
-                    audio = audio.set_frame_rate(16000)
-                    audio.export(downloaded_file, format="wav")
-                    if status_callback:
-                        status_callback(43, "Аудио преобразовано в моно формат с помощью pydub")
-                except Exception as e2:
-                    print(f"Ошибка при использовании pydub: {e2}")
-                    if status_callback:
-                        status_callback(43, "Не удалось преобразовать аудио в моно. Продолжаем с исходным файлом.")
-            
-            return downloaded_file, video_info
-    except Exception as e:
-        print(f"Ошибка при загрузке видео: {e}")
-        traceback.print_exc()
-        if status_callback:
-            status_callback(0, f"Ошибка при загрузке видео: {str(e)}")
-        return None, None
-
-def create_docx(transcript, filename="transcript", with_timestamps=False, video_info=None):
-    """Создание DOCX файла с транскрипцией."""
-    doc = docx.Document()
-    
-    # Стилизация заголовка
-    title = doc.add_heading("Транскрипция аудио", 0)
-    title_paragraph = title.paragraph_format
-    title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    # Добавление информации о видео, если она есть
-    if video_info:
-        video_paragraph = doc.add_paragraph()
-        video_paragraph.add_run("Информация о видео:\n").bold = True
-        video_paragraph.add_run(f"Название: {video_info['title']}\n")
-        video_paragraph.add_run(f"Автор: {video_info['uploader']}\n")
+        # Проверка общей длины и информативности
+        total_words = sum(len(segment['text'].split()) for segment in transcript)
         
-        if video_info['duration']:
-            minutes, seconds = divmod(video_info['duration'], 60)
-            video_paragraph.add_run(f"Длительность: {minutes}:{seconds:02d}\n")
+        # Оценка качества
+        if len(unique_texts) < len(transcript) * 0.5:
+            return "Возможно дублирование текста"
         
-        if video_info['upload_date']:
-            upload_date = video_info['upload_date']
-            formatted_date = f"{upload_date[6:8]}.{upload_date[4:6]}.{upload_date[0:4]}"
-            video_paragraph.add_run(f"Дата публикации: {formatted_date}\n")
+        if total_words < 10:
+            return "Слишком короткая транскрипция"
+        
+        return "Транскрипция выглядит корректной"
     
-    # Добавление даты и времени
-    date_paragraph = doc.add_paragraph()
-    date_run = date_paragraph.add_run(f"Дата транскрипции: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
-    date_run.font.size = Pt(10)
-    date_run.font.italic = True
-    date_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    
-    # Горизонтальная линия
-    doc.add_paragraph("_" * 80)
-    
-    # Добавление транскрибированного текста с красивым оформлением
-    if with_timestamps and isinstance(transcript, list):
-        # Оформление с таймингами и разными говорящими
-        for segment in transcript:
-            paragraph = doc.add_paragraph()
-            
-            # Добавление тайминга
-            time_run = paragraph.add_run(f"[{segment['start_time']}] ")
-            time_run.font.bold = True
-            time_run.font.size = Pt(10)
-            time_run.font.color.rgb = RGBColor(100, 100, 100)
-            
-            # Добавление говорящего
-            speaker_run = paragraph.add_run(f"{segment['speaker']}: ")
-            speaker_run.font.bold = True
-            speaker_run.font.color.rgb = RGBColor(0, 0, 150)
-            
-            # Добавление текста
-            text_run = paragraph.add_run(segment['text'])
-            text_run.font.size = Pt(11)
-            
-            # Добавление пустой строки между говорящими
-            doc.add_paragraph()
-    else:
-        # Обычный текст без разделения на говорящих
-        paragraph = doc.add_paragraph()
-        text_run = paragraph.add_run(transcript)
-        text_run.font.size = Pt(11)
-    
-    # Добавление нижнего колонтитула
-    footer = doc.add_paragraph()
-    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    footer_run = footer.add_run("Создано с помощью сервиса транскрипции аудио")
-    footer_run.font.size = Pt(8)
-    footer_run.font.italic = True
-    
-    # Сохранение во временный файл
-    temp_file = os.path.join(tempfile.gettempdir(), 'transcripts', f"{filename}.docx")
-    doc.save(temp_file)
-    
-    return temp_file
+    return "Нет данных для анализа"
 
-def save_transcript_to_session(session_id, transcript, docx_path, with_timestamps=False, video_info=None, language_code='ru-RU'):
-    """Сохранение транскрипции в сессию с информацией о языке"""
-    # Формируем уникальный URL для доступа к сессии
-    share_url = f"/share/{session_id}"
-    
-    sessions[session_id] = {
-        'created_at': datetime.datetime.now().timestamp(),
-        'transcript': transcript,
-        'docx_path': docx_path,
-        'with_timestamps': with_timestamps,
-        'video_info': video_info,
-        'share_url': share_url,
-        'language': language_code  # Добавляем информацию о языке
-    }
-    
-    # Очистка старых сессий (старше 24 часов)
-    current_time = datetime.datetime.now().timestamp()
-    sessions_to_delete = []
-    
-    for s_id, s_data in sessions.items():
-        if current_time - s_data['created_at'] > app.config['SESSION_EXPIRY']:
-            sessions_to_delete.append(s_id)
-    
-    for s_id in sessions_to_delete:
-        del sessions[s_id]
-    
-    return share_url
-
+# Определение маршрутов веб-приложения
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -1661,12 +940,10 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
             }
         
         # Обновляем начальный статус
-        update_status(5, "Начало транскрибирования")
+        update_status(5, "Начало транскрибирования с улучшенной русской моделью Whisper")
         
-        # Используем Whisper вместо Google Speech-to-Text
-        from whisper_service import transcribe_with_whisper
-        
-        transcript = transcribe_with_whisper(
+        # Переключаемся на использование новой функции транскрибирования
+        transcript = transcribe_audio(
             file_path, 
             language_code=language_code,
             enable_timestamps=enable_timestamps, 
@@ -1710,8 +987,8 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
             'message': f'Ошибка: {str(e)}'
         }
         
-def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU', use_vertex_ai=False):
-    """Обработка ссылки на YouTube в отдельном потоке - обновлено для использования Chirp 2"""
+def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU'):
+    """Обработка ссылки на YouTube в отдельном потоке с использованием Whisper"""
     try:
         # Функция обновления статуса
         def update_status(percent, message):
@@ -1736,13 +1013,11 @@ def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU',
             return
         
         # Запускаем транскрибирование с указанным языком
-        # Важно: параметр use_vertex_ai=False, т.к. мы используем Chirp 2 через Speech API
         transcript = transcribe_audio(
             audio_path, 
             enable_timestamps=enable_timestamps, 
             status_callback=update_status,
-            language_code=language_code,
-            use_vertex_ai=False
+            language_code=language_code
         )
         
         # Генерируем ID сессии
@@ -1771,7 +1046,7 @@ def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU',
         task_status[task_id] = {
             'status': 'complete',
             'percent': 100,
-            'message': 'Транскрипция завершена с Chirp 2',
+            'message': 'Транскрипция завершена',
             'transcript': transcript,
             'docx_path': os.path.basename(docx_path),
             'with_timestamps': enable_timestamps,
@@ -1892,7 +1167,7 @@ def process_link():
     
     # Запускаем обработку в отдельном потоке, передавая язык
     threading.Thread(target=process_youtube_link, 
-                     args=(url, enable_timestamps, task_id, language_code)).start()
+                    args=(url, enable_timestamps, task_id, language_code)).start()
     
     # Возвращаем ID задачи клиенту
     return jsonify({
@@ -1967,30 +1242,6 @@ def analyze_transcript_api():
             'status': 'error',
             'message': f'Ошибка при анализе: {str(e)}'
         }), 500
-    
-
-def check_transcription_quality(transcript):
-    """
-    Проверка качества транскрипции
-    """
-    if isinstance(transcript, list):
-        # Проверка на повторы
-        unique_texts = set(segment['text'] for segment in transcript)
-        
-        # Проверка общей длины и информативности
-        total_words = sum(len(segment['text'].split()) for segment in transcript)
-        
-        # Оценка качества
-        if len(unique_texts) < len(transcript) * 0.5:
-            return "Возможно дублирование текста"
-        
-        if total_words < 10:
-            return "Слишком короткая транскрипция"
-        
-        return "Транскрипция выглядит корректной"
-    
-    return "Нет данных для анализа"
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

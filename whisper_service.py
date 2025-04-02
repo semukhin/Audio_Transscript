@@ -4,17 +4,25 @@ import tempfile
 import subprocess
 import json
 import logging
+import torch
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+import numpy as np
 from datetime import datetime
 
 # Настройка логгера
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Путь к директории с моделями Whisper
-WHISPER_MODEL_DIR = os.environ.get('WHISPER_MODEL_DIR', '/app/models')
+# Конфигурация
+MODEL_NAME = os.environ.get('WHISPER_MODEL_NAME', 'antony66/whisper-large-v3-russian')
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "float32"
+CACHE_DIR = os.environ.get('WHISPER_CACHE_DIR', '/app/models')
 
-# Размер модели Whisper: tiny, base, small, medium или large
-WHISPER_MODEL_SIZE = os.environ.get('WHISPER_MODEL_SIZE', 'small')
+# Переменные для ленивой загрузки модели
+model = None
+processor = None
+pipe = None
 
 def format_time(seconds):
     """Форматирование времени в формат ММ:СС"""
@@ -48,21 +56,96 @@ def prepare_audio(file_path, status_callback=None):
             status_callback(10, f"Ошибка при подготовке аудио: {str(e)}")
         return file_path
 
+def load_model():
+    """Ленивая загрузка модели при первом использовании"""
+    global model, processor, pipe
+    
+    if pipe is None:
+        logger.info(f"Загрузка модели {MODEL_NAME}...")
+        
+        # Загружаем модель и процессор
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            MODEL_NAME,
+            torch_dtype=torch.float16 if COMPUTE_TYPE == "float16" else torch.float32,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            cache_dir=CACHE_DIR
+        )
+        model.to(DEVICE)
+        
+        processor = AutoProcessor.from_pretrained(
+            MODEL_NAME,
+            cache_dir=CACHE_DIR
+        )
+        
+        # Создаем pipeline
+        pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            max_new_tokens=128,
+            chunk_length_s=30,
+            batch_size=16,
+            return_timestamps=True,
+            torch_dtype=torch.float16 if COMPUTE_TYPE == "float16" else torch.float32,
+            device=DEVICE,
+        )
+        
+        logger.info(f"Модель {MODEL_NAME} успешно загружена на устройство {DEVICE} с типом {COMPUTE_TYPE}")
+    
+    return pipe
+
+def detect_speakers(segments, min_pause=1.0):
+    """
+    Простая система определения говорящих на основе пауз
+    """
+    speakers = []
+    current_speaker = 1
+    last_end_time = 0
+    
+    for segment in segments:
+        start_time = segment['start']
+        
+        # Если пауза превышает порог, считаем, что говорит другой человек
+        if start_time - last_end_time > min_pause:
+            current_speaker = 2 if current_speaker == 1 else 1
+        
+        speakers.append(current_speaker)
+        last_end_time = segment['end']
+    
+    return speakers
+
 def transcribe_with_whisper(file_path, language_code=None, enable_timestamps=False, status_callback=None):
-    """Транскрибирование с использованием локальной модели Whisper"""
+    """Транскрибирование с использованием модели whisper-large-v3-russian"""
     try:
         if status_callback:
-            status_callback(15, f"Запуск транскрипции с Whisper (модель: {WHISPER_MODEL_SIZE})")
+            status_callback(15, f"Запуск транскрипции с {MODEL_NAME}")
         
         # Подготовка аудиофайла
         prepared_file = prepare_audio(file_path, status_callback)
         
-        # Определяем язык для Whisper
-        whisper_lang = None
-        if language_code:
-            # Преобразование кодов языка из формата Google в формат Whisper
+        # Загрузка модели (ленивая загрузка)
+        if status_callback:
+            status_callback(20, "Загрузка модели...")
+        
+        asr_pipeline = load_model()
+        
+        # Запуск транскрипции
+        if status_callback:
+            status_callback(30, "Начало распознавания речи...")
+        
+        start_time = time.time()
+        
+        # Определяем параметры для распознавания
+        transcribe_params = {
+            "return_timestamps": True,  # Всегда получаем таймкоды для внутренней обработки
+        }
+        
+        # Если указан язык и это не русский, явно задаем языковой код
+        if language_code and language_code.lower() not in ["ru", "ru-ru"]:
+            # Конвертируем коды языков из формата Google в формат Whisper
             lang_map = {
-                'ru-RU': 'ru', 
                 'en-US': 'en', 
                 'uk-UA': 'uk', 
                 'be-BY': 'be', 
@@ -74,109 +157,71 @@ def transcribe_with_whisper(file_path, language_code=None, enable_timestamps=Fal
                 'zh-CN': 'zh', 
                 'ja-JP': 'ja'
             }
-            whisper_lang = lang_map.get(language_code)
+            whisper_lang = lang_map.get(language_code, language_code[:2].lower())
+            transcribe_params["language"] = whisper_lang
         
-        # Создаем временный файл для сохранения результатов
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as tmp_file:
-            output_json = tmp_file.name
+        # Отслеживание прогресса на основе размера файла
+        file_size = os.path.getsize(prepared_file)
         
-        # Формируем команду для запуска Whisper
-        cmd = [
-            'whisper', prepared_file,
-            '--model', WHISPER_MODEL_SIZE,
-            '--output_dir', tempfile.gettempdir(),
-            '--output_format', 'json'
-        ]
+        def progress_callback(step, total_steps):
+            if status_callback:
+                progress = 30 + int((step / total_steps) * 60)
+                status_callback(progress, f"Распознавание: {int((step / total_steps) * 100)}%")
         
-        # Добавляем параметр языка, если указан
-        if whisper_lang:
-            cmd.extend(['--language', whisper_lang])
+        # Добавляем обратный вызов для отслеживания прогресса
+        transcribe_params["callback_function"] = progress_callback
         
-        # Параметры для таймингов
-        if enable_timestamps:
-            cmd.append('--word_timestamps')
-        
-        if status_callback:
-            status_callback(20, "Запуск процесса распознавания...")
-        
-        # Запускаем Whisper
-        start_time = time.time()
-        process = subprocess.Popen(
-            cmd, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
+        # Выполняем распознавание
+        result = asr_pipeline(
+            prepared_file,
+            generate_kwargs={"language": "ru"},
+            **transcribe_params
         )
         
-        # Отслеживаем прогресс
-        for line in process.stderr:
-            if 'progress' in line.lower():
-                try:
-                    progress_str = line.strip().split('progress: ')[1].split('%')[0]
-                    progress = float(progress_str)
-                    # Масштабируем прогресс от 20% до 90%
-                    scaled_progress = 20 + (progress * 0.7)
-                    if status_callback:
-                        status_callback(int(scaled_progress), f"Распознавание: {progress:.1f}%")
-                except (IndexError, ValueError):
-                    pass
-        
-        # Ждем завершения процесса
-        process.wait()
         elapsed_time = time.time() - start_time
-        
-        if process.returncode != 0:
-            error_output = process.stderr.read()
-            logger.error(f"Ошибка Whisper: {error_output}")
-            if status_callback:
-                status_callback(90, f"Ошибка при транскрибировании: код {process.returncode}")
-            return "Ошибка при транскрибировании аудио"
-        
-        # Определяем путь к сгенерированному JSON-файлу
-        base_name = os.path.basename(prepared_file).rsplit('.', 2)[0]
-        json_file = os.path.join(tempfile.gettempdir(), f"{base_name}.json")
         
         if status_callback:
             status_callback(90, f"Транскрипция завершена за {elapsed_time:.1f} секунд")
         
         # Обработка результатов
-        with open(json_file, 'r', encoding='utf-8') as f:
-            result = json.load(f)
-        
-        # Форматирование вывода
         if enable_timestamps:
-            # Результат с таймингами и разделением по говорящим
-            segments = result.get('segments', [])
-            transcript = []
+            # Обработка результатов с таймкодами
+            segments = result.get("chunks", [])
             
-            # Определение говорящих (Whisper не делает диаризацию, определим по переменам)
-            last_speaker_id = 1
-            previous_end = 0
+            if not segments and "segments" in result:
+                segments = result["segments"]
             
-            for i, segment in enumerate(segments):
-                start = segment.get('start', 0)
+            # Если есть сегменты, обрабатываем их
+            if segments:
+                # Определяем говорящих
+                speaker_ids = detect_speakers(segments)
                 
-                # Если разрыв больше 1.5 секунд, считаем новым говорящим
-                if start - previous_end > 1.5:
-                    last_speaker_id = 2 if last_speaker_id == 1 else 1
+                # Форматируем транскрипцию
+                transcript = []
+                for i, segment in enumerate(segments):
+                    speaker_id = speaker_ids[i]
+                    transcript.append({
+                        'speaker': f"Говорящий {speaker_id}",
+                        'text': segment['text'].strip(),
+                        'start_time': format_time(segment['start'])
+                    })
                 
-                previous_end = segment.get('end', 0)
-                
-                transcript.append({
-                    'speaker': f"Говорящий {last_speaker_id}",
-                    'text': segment.get('text', '').strip(),
-                    'start_time': format_time(start)
-                })
-            
-            return transcript
+                return transcript
+            else:
+                # Если сегменты не найдены, возвращаем весь текст с начальным таймкодом
+                return [{
+                    'speaker': "Говорящий 1",
+                    'text': result.get('text', '').strip(),
+                    'start_time': "00:00"
+                }]
         else:
-            # Просто текст без таймингов
+            # Просто текст без таймкодов
             return result.get('text', '').strip()
         
     except Exception as e:
-        logger.error(f"Ошибка при распознавании аудио с Whisper: {e}")
+        logger.error(f"Ошибка при распознавании аудио с {MODEL_NAME}: {e}")
+        import traceback
+        traceback.print_exc()
         if status_callback:
             status_callback(90, f"Ошибка: {str(e)}")
         return f"Ошибка при транскрибировании: {str(e)}"
@@ -185,5 +230,5 @@ def transcribe_with_whisper(file_path, language_code=None, enable_timestamps=Fal
         if 'prepared_file' in locals() and prepared_file != file_path:
             try:
                 os.remove(prepared_file)
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка при удалении временного файла: {e}")

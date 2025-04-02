@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  flask:
+    build:
+      context: .
+      dockerfile: Dockerfile_flask
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uploads:/app/uploads
+      - /tmp/transcripts:/tmp/transcripts
+    depends_on:
+      - whisper
+    environment:
+      - FLASK_ENV=production
+      - WHISPER_SERVICE_URL=http://whisper:5001/
+      - GOOGLE_CREDENTIALS_PATH=/app/credentials/lawgpt2025-credentials.json
+    restart: unless-stopped
+
+  whisper:
+    build:
+      context: .
+      dockerfile: Dockerfile_whisper
+    volumes:
+      - ./uploads:/app/uploads
+      - whisper_models:/app/models
+    environment:
+      - WHISPER_MODEL_NAME=antony66/whisper-large-v3-russian
+      - CUDA_VISIBLE_DEVICES=0  # Если есть GPU
+    restart: unless-stopped
+    # Если у вас есть GPU, раскомментируйте следующие строки:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  whisper_models:
+    # Персистентное хранилище для моделей Whisper

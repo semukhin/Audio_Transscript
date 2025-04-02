@@ -17,10 +17,10 @@ def transcribe_with_whisper_api(
     enable_timestamps: bool = False, 
     status_callback: Optional[Callable[[int, str], None]] = None
 ):
-    """Отправка файла на транскрипцию через Whisper API сервис"""
+    """Отправка файла на транскрипцию через Whisper API сервис с улучшенной моделью русского языка"""
     try:
         if status_callback:
-            status_callback(5, "Подготовка к отправке файла на транскрипцию")
+            status_callback(5, "Подготовка к отправке файла на транскрипцию с улучшенной моделью для русского языка")
         
         # Подготовка данных для запроса
         with open(file_path, 'rb') as file:
@@ -31,23 +31,7 @@ def transcribe_with_whisper_api(
             
             # Добавляем языковой код, если указан
             if language_code:
-                # Конвертируем код языка из формата Google в формат Whisper
-                lang_map = {
-                    'ru-RU': 'ru', 
-                    'en-US': 'en', 
-                    'uk-UA': 'uk', 
-                    'be-BY': 'be', 
-                    'kk-KZ': 'kk', 
-                    'de-DE': 'de', 
-                    'fr-FR': 'fr', 
-                    'es-ES': 'es', 
-                    'it-IT': 'it', 
-                    'zh-CN': 'zh', 
-                    'ja-JP': 'ja'
-                }
-                whisper_lang = lang_map.get(language_code)
-                if whisper_lang:
-                    data['language'] = whisper_lang
+                data['language'] = language_code
             
             if status_callback:
                 status_callback(10, "Отправка файла на сервер транскрипции")
@@ -77,7 +61,7 @@ def transcribe_with_whisper_api(
                 return "Ошибка сервера транскрипции: не получен ID задачи"
             
             if status_callback:
-                status_callback(20, "Файл принят сервером, ожидание результатов")
+                status_callback(20, f"Файл принят сервером, модель: {task_data.get('model', 'whisper-large-v3-russian')}")
             
             # Ожидаем завершения задачи и получаем результаты
             completed = False

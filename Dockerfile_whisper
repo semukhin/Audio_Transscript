@@ -5,11 +5,13 @@ WORKDIR /app
 # Установка необходимых системных зависимостей
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Установка OpenAI Whisper и нужных Python-пакетов
+# Установка Python-пакетов
 RUN pip install --no-cache-dir \
-    openai-whisper \
+    transformers \
+    huggingface_hub \
     fastapi \
     uvicorn \
     python-multipart \
@@ -20,13 +22,17 @@ RUN mkdir -p /app/models /app/uploads
 
 # Копирование кода сервиса
 COPY whisper_api.py .
+COPY whisper_service.py .
+
+# Предварительная загрузка модели
+RUN python -c "from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq; \
+    AutoProcessor.from_pretrained('antony66/whisper-large-v3-russian'); \
+    AutoModelForSpeechSeq2Seq.from_pretrained('antony66/whisper-large-v3-russian')"
 
 # Создание пользователя без привилегий
 RUN useradd -m whisperuser && chown -R whisperuser:whisperuser /app
 USER whisperuser
 
-# Скачивание выбранной модели при запуске контейнера
-ENV WHISPER_MODEL_SIZE=small
 ENV PYTHONUNBUFFERED=1
 
 # Запуск API сервиса
