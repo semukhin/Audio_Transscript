@@ -1,11 +1,9 @@
 venv/
-lawgpt2025-4a4960627584.json
-
+uploads/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.pyw
-*.pyz
 *.pywz
 *.pyzw
