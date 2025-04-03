@@ -6,6 +6,8 @@ import time
 import datetime
 import threading
 import re
+import ssl
+import urllib3
 from flask import Flask, render_template, request, jsonify, send_file, url_for
 from werkzeug.utils import secure_filename
 import yt_dlp
@@ -18,6 +20,11 @@ import magic
 from langdetect import detect, LangDetectException
 from pydub import AudioSegment
 from pydub.silence import detect_silence
+import requests
+
+# Отключаем проверку SSL сертификатов
+ssl._create_default_https_context = ssl._create_unverified_context
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Определение конфигурации в зависимости от окружения
 config_name = os.environ.get('FLASK_CONFIG', 'default')
@@ -43,16 +50,21 @@ ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'webm'}
 task_status = {}
 sessions = {}
 
+
 def generate_task_id():
     """Генерация уникального ID задачи"""
     return str(uuid.uuid4())
+
 
 def generate_session_id():
     """Генерация уникального ID сессии"""
     return str(uuid.uuid4())
 
+
 def allowed_file(filename):
+    """Проверка допустимости расширения файла"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 
 def format_time(seconds):
     """Форматирование времени в формат ММ:СС"""
@@ -60,13 +72,13 @@ def format_time(seconds):
     seconds = int(seconds) % 60
     return f"{minutes:02d}:{seconds:02d}"
 
+
 def check_and_convert_audio_channels(file_path, status_callback=None):
     """
     Проверяет количество каналов в аудиофайле и при необходимости конвертирует в моно
     Использует ffmpeg напрямую для более надежной обработки
     """
     try:
-        # Проверка количества каналов с помощью ffprobe
         import subprocess
         import json
         
@@ -107,7 +119,7 @@ def check_and_convert_audio_channels(file_path, status_callback=None):
             if status_callback:
                 status_callback(9, f"Файл имеет {channels} каналов. Конвертация в моно...")
             
-            output_path = file_path + '.mono.wav'
+            output_path = f"{file_path}.mono.wav"
             cmd = [
                 'ffmpeg', '-y', '-i', file_path, 
                 '-ac', '1', '-ar', '16000', 
@@ -130,54 +142,58 @@ def check_and_convert_audio_channels(file_path, status_callback=None):
             status_callback(10, f"Предупреждение: {str(e)}. Используем исходный файл.")
         return file_path
 
+
 def prepare_audio_for_transcription(file_path, status_callback=None):
     """Подготовка аудиофайла для транскрипции: конвертация в подходящий формат"""
     try:
-        # Проверяем наличие расширения для определения формата
-        from pydub import AudioSegment
-        
         if status_callback:
             status_callback(5, "Анализ аудиофайла...")
         
         # Получаем расширение файла
         file_ext = os.path.splitext(file_path)[1].lower()
+        output_path = f"{file_path}.mono.wav"
         
         try:
             if status_callback:
-                status_callback(8, f"Преобразование аудио в оптимальный формат...")
-            
-            output_path = file_path + '.mono.wav'
+                status_callback(8, "Преобразование аудио в оптимальный формат...")
             
             # Загружаем аудио с помощью pydub
-            if file_ext == '.mp3':
-                audio = AudioSegment.from_mp3(file_path)
-            elif file_ext == '.m4a':
-                audio = AudioSegment.from_file(file_path, format="m4a")
-            elif file_ext == '.ogg':
-                audio = AudioSegment.from_ogg(file_path)
-            elif file_ext == '.flac':
-                audio = AudioSegment.from_file(file_path, format="flac")
-            elif file_ext == '.webm':
-                audio = AudioSegment.from_file(file_path, format="webm")
-            elif file_ext == '.opus':
-                audio = AudioSegment.from_file(file_path, format="opus")
-            elif file_ext == '.wav':
-                audio = AudioSegment.from_wav(file_path)
-            else:
-                audio = AudioSegment.from_file(file_path)
-            
-            # Всегда преобразуем в моно, независимо от исходного формата
-            audio = audio.set_channels(1)  # 1 канал (моно)
-            audio = audio.set_sample_width(2)  # 16 bit
-            audio = audio.set_frame_rate(16000)  # 16 kHz частота дискретизации
-            
-            # Сохраняем в моно WAV
-            audio.export(output_path, format="wav")
-            
-            if status_callback:
-                status_callback(10, "Аудио успешно преобразовано в формат WAV mono для распознавания")
-            
-            return output_path
+            try:
+                from pydub import AudioSegment
+                
+                if file_ext == '.mp3':
+                    audio = AudioSegment.from_mp3(file_path)
+                elif file_ext == '.m4a':
+                    audio = AudioSegment.from_file(file_path, format="m4a")
+                elif file_ext == '.ogg':
+                    audio = AudioSegment.from_ogg(file_path)
+                elif file_ext == '.flac':
+                    audio = AudioSegment.from_file(file_path, format="flac")
+                elif file_ext == '.webm':
+                    audio = AudioSegment.from_file(file_path, format="webm")
+                elif file_ext == '.opus':
+                    audio = AudioSegment.from_file(file_path, format="opus")
+                elif file_ext == '.wav':
+                    audio = AudioSegment.from_wav(file_path)
+                else:
+                    audio = AudioSegment.from_file(file_path)
+                
+                # Всегда преобразуем в моно, независимо от исходного формата
+                audio = audio.set_channels(1)  # 1 канал (моно)
+                audio = audio.set_sample_width(2)  # 16 bit
+                audio = audio.set_frame_rate(16000)  # 16 kHz частота дискретизации
+                
+                # Сохраняем в моно WAV
+                audio.export(output_path, format="wav")
+                
+                if status_callback:
+                    status_callback(10, "Аудио успешно преобразовано в формат WAV mono для распознавания")
+                
+                return output_path
+            except ImportError:
+                # Если pydub не установлен, используем ffmpeg
+                raise ImportError("pydub не установлен, используем ffmpeg")
+                
         except Exception as e:
             print(f"Ошибка при конвертации аудио: {e}")
             traceback.print_exc()
@@ -187,7 +203,6 @@ def prepare_audio_for_transcription(file_path, status_callback=None):
             # Попытка аварийной конвертации через ffmpeg
             try:
                 import subprocess
-                output_path = file_path + '.mono.wav'
                 cmd = [
                     'ffmpeg', '-y', '-i', file_path, 
                     '-ac', '1', '-ar', '16000', 
@@ -205,13 +220,13 @@ def prepare_audio_for_transcription(file_path, status_callback=None):
                     status_callback(10, f"Ошибка резервной конвертации: {str(e2)}. Используем исходный файл.")
                 return file_path
     
-    except ImportError as ie:
+    except ImportError:
         # Если pydub не установлен
-        print(f"Предупреждение: библиотека не установлена ({ie}). Конвертация аудио недоступна.")
+        print("Предупреждение: библиотека pydub не установлена. Используем ffmpeg напрямую.")
         try:
             # Попытка использовать ffmpeg напрямую
             import subprocess
-            output_path = file_path + '.mono.wav'
+            output_path = f"{file_path}.mono.wav"
             cmd = [
                 'ffmpeg', '-y', '-i', file_path, 
                 '-ac', '1', '-ar', '16000', 
@@ -227,16 +242,17 @@ def prepare_audio_for_transcription(file_path, status_callback=None):
             print(f"Ошибка при использовании ffmpeg: {e}")
             return file_path
 
+
 def check_audio_for_speech(file_path, status_callback=None):
     """Проверка аудиофайла на наличие речи и шумов"""
     try:
-        from pydub import AudioSegment
-        from pydub.silence import detect_nonsilent
-        
         if status_callback:
             status_callback(12, "Проверка аудио на наличие речи...")
         
         try:
+            from pydub import AudioSegment
+            from pydub.silence import detect_nonsilent
+            
             audio = AudioSegment.from_file(file_path)
             
             # Проверяем на наличие не-тишины
@@ -262,6 +278,7 @@ def check_audio_for_speech(file_path, status_callback=None):
     except ImportError:
         # Если pydub не установлен
         return True, "Предупреждение: библиотека pydub не установлена. Проверка аудио недоступна."
+
 
 def detect_speaker_names(transcript):
     """
@@ -303,6 +320,7 @@ def detect_speaker_names(transcript):
     
     return transcript
 
+
 def detect_audio_language(file_path):
     """Определение языка аудио с улучшенной логикой"""
     try:
@@ -321,6 +339,7 @@ def detect_audio_language(file_path):
         print(f"Ошибка при определении языка аудио: {e}")
         return 'ru-RU'  # В случае ошибки также используем русский
 
+
 def split_audio_on_silence(file_path, min_silence_len=700, silence_thresh=-40, 
                          min_segment_len=45000, max_segment_len=55000,
                          pause_search_start=50000, pause_search_end=58000):
@@ -335,42 +354,51 @@ def split_audio_on_silence(file_path, min_silence_len=700, silence_thresh=-40,
         max_segment_len: максимальная длина сегмента (мс)
         pause_search_start: начало диапазона поиска паузы (мс)
         pause_search_end: конец диапазона поиска паузы (мс)
+    
+    Returns:
+        Список кортежей (начало, конец) для каждого сегмента в миллисекундах
     """
-    audio = AudioSegment.from_file(file_path)
-    audio_len = len(audio)
-    segments = []
-    start = 0
+    try:
+        audio = AudioSegment.from_file(file_path)
+        audio_len = len(audio)
+        segments = []
+        start = 0
 
-    while start < audio_len:
-        # Определяем конец текущего сегмента
-        end = min(start + max_segment_len, audio_len)
-        
-        # Если это последний фрагмент или он короткий, сохраняем как есть
-        if end - start <= min_segment_len or end == audio_len:
-            segments.append((start, end))
-            break
-        
-        # Ищем подходящую паузу для разделения
-        search_end = min(start + pause_search_end, end)
-        search_start = max(start + pause_search_start, start + min_segment_len)
-        
-        segment = audio[search_start:search_end]
-        silence_ranges = detect_silence(segment, 
-                                     min_silence_len=min_silence_len,
-                                     silence_thresh=silence_thresh)
-        
-        if silence_ranges:
-            # Берем середину самой длинной паузы
-            longest_silence = max(silence_ranges, key=lambda x: x[1] - x[0])
-            split_point = search_start + (longest_silence[0] + longest_silence[1]) // 2
-            segments.append((start, split_point))
-            start = split_point
-        else:
-            # Если паузу не нашли, делим по максимальной длине
-            segments.append((start, end))
-            start = end
+        while start < audio_len:
+            # Определяем конец текущего сегмента
+            end = min(start + max_segment_len, audio_len)
+            
+            # Если это последний фрагмент или он короткий, сохраняем как есть
+            if end - start <= min_segment_len or end == audio_len:
+                segments.append((start, end))
+                break
+            
+            # Ищем подходящую паузу для разделения
+            search_end = min(start + pause_search_end, end)
+            search_start = max(start + pause_search_start, start + min_segment_len)
+            
+            segment = audio[search_start:search_end]
+            silence_ranges = detect_silence(segment, 
+                                        min_silence_len=min_silence_len,
+                                        silence_thresh=silence_thresh)
+            
+            if silence_ranges:
+                # Берем середину самой длинной паузы
+                longest_silence = max(silence_ranges, key=lambda x: x[1] - x[0])
+                split_point = search_start + (longest_silence[0] + longest_silence[1]) // 2
+                segments.append((start, split_point))
+                start = split_point
+            else:
+                # Если паузу не нашли, делим по максимальной длине
+                segments.append((start, end))
+                start = end
 
-    return segments
+        return segments
+    except Exception as e:
+        print(f"Ошибка при разделении аудио: {e}")
+        # Возвращаем весь файл как один сегмент в случае ошибки
+        return [(0, audio_len)] if 'audio_len' in locals() else []
+
 
 # Импорт whisper_client для взаимодействия с новым сервисом
 from whisper_client import transcribe_with_whisper_api
@@ -421,6 +449,7 @@ def transcribe_audio(file_path, language_code='ru-RU', enable_timestamps=False, 
         traceback.print_exc()
         return f"Ошибка при транскрибировании: {str(e)}"
 
+
 def get_video_info(url):
     """Получение информации о видео по ссылке"""
     ydl_opts = {
@@ -437,7 +466,20 @@ def get_video_info(url):
         'nocheckcertificate': True,
         'ssl_verify': False,
         'retries': 3,
-        'progress_hooks': []
+        'extractor_args': {
+            'youtube': {
+                'skip': ['dash', 'hls'],
+                'player_skip': ['js', 'configs', 'webpage']
+            }
+        },
+        'progress_hooks': [],
+        'verify': False,  # Отключаем проверку SSL
+        'no_check_certificate': True,  # Дополнительное отключение проверки сертификатов
+        'legacyserverconnect': True,  # Используем устаревший метод подключения
+        'no_warnings': True,
+        'quiet': True,
+        'socket_timeout': 30,  # Увеличиваем таймаут
+        'source_address': '0.0.0.0'  # Привязываем к любому IP
     }
     
     try:
@@ -454,102 +496,101 @@ def get_video_info(url):
         print(f"Ошибка при получении информации о видео: {e}")
         return None
 
+
 def download_from_youtube(url, status_callback=None):
-    """Загрузка аудио из YouTube-видео."""
-    if status_callback:
-        status_callback(10, "Подготовка к загрузке видео...")
-    
-    # Получаем информацию о видео
-    video_info = get_video_info(url)
-    if video_info:
-        if status_callback:
-            status_callback(12, f"Найдено видео: {video_info['title']}")
-    
-    temp_dir = tempfile.gettempdir()
-    output_file = os.path.join(temp_dir, f"{uuid.uuid4()}.%(ext)s")
-    
-    # Настройка yt-dlp без некорректного постпроцессора
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_file,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'wav',
-            'preferredquality': '192',
-        }],
-        'quiet': False,
-        'no_warnings': False,
-        'geo_bypass': True,
-        'nocheckcertificate': True,
-        'ssl_verify': False,
-        'retries': 3, 
-        'progress_hooks': [lambda d: status_callback(
-            min(10 + int(d.get('downloaded_percent', 0) * 0.3), 40), 
-            f"Загрузка видео: {d.get('downloaded_percent', 0):.1f}%"
-        ) if status_callback and 'downloaded_percent' in d else None],
-    }
-    
+    """Загрузка аудио из YouTube видео"""
     try:
         if status_callback:
-            status_callback(15, "Загрузка видео...")
+            status_callback(5, "Подготовка к загрузке видео...")
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            downloaded_file = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.wav'
-            
-            if status_callback:
-                status_callback(40, "Видео загружено и преобразовано в аудио")
-            
-            # Ручное преобразование в моно с помощью ffmpeg
-            try:
-                import subprocess
-                
-                if status_callback:
-                    status_callback(41, "Преобразование аудио в монофонический формат...")
-                
-                mono_file = downloaded_file + '.mono.wav'
-                cmd = [
-                    'ffmpeg', '-y', '-i', downloaded_file, 
-                    '-ac', '1', '-ar', '16000', 
-                    '-vn', '-acodec', 'pcm_s16le', mono_file
-                ]
-                
-                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
-                # Проверяем, что файл создан
-                if os.path.exists(mono_file):
-                    os.replace(mono_file, downloaded_file)
-                    if status_callback:
-                        status_callback(42, "Аудио успешно преобразовано в моно формат")
-                else:
-                    if status_callback:
-                        status_callback(42, "Не удалось преобразовать в моно. Используем исходный файл.")
-            except Exception as e:
-                print(f"Ошибка при преобразовании в моно: {e}")
-                if status_callback:
-                    status_callback(42, f"Предупреждение: {str(e)}. Попытка использовать pydub...")
-                
-                # Запасной вариант с использованием pydub
+        # Создаем временную директорию для загрузки
+        temp_dir = tempfile.mkdtemp()
+        temp_file = os.path.join(temp_dir, 'audio')
+        
+        # Настройки для yt-dlp с полностью отключенной проверкой SSL
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                'preferredquality': '192',
+            }],
+            'outtmpl': temp_file,
+            'nocheckcertificate': True,
+            'no_warnings': True,
+            'quiet': True,
+            'extract_flat': False,
+            'force_generic_extractor': False,
+            'ssl_verify': False,
+            'geo_bypass': True,
+            'retries': 3,
+            'extractor_args': {
+                'youtube': {
+                    'skip': ['dash', 'hls'],
+                    'player_skip': ['js', 'configs', 'webpage']
+                }
+            },
+            'progress_hooks': [lambda d: download_progress_hook(d, status_callback) if status_callback else None],
+            'verify': False,  # Отключаем проверку SSL
+            'no_check_certificate': True,  # Дополнительное отключение проверки сертификатов
+            'legacyserverconnect': True,  # Используем устаревший метод подключения
+            'no_warnings': True,
+            'quiet': True
+        }
+        
+        def download_progress_hook(d, callback):
+            if d['status'] == 'downloading':
                 try:
-                    from pydub import AudioSegment
-                    audio = AudioSegment.from_wav(downloaded_file)
-                    audio = audio.set_channels(1)
-                    audio = audio.set_frame_rate(16000)
-                    audio.export(downloaded_file, format="wav")
-                    if status_callback:
-                        status_callback(43, "Аудио преобразовано в моно формат с помощью pydub")
-                except Exception as e2:
-                    print(f"Ошибка при использовании pydub: {e2}")
-                    if status_callback:
-                        status_callback(43, "Не удалось преобразовать аудио в моно. Продолжаем с исходным файлом.")
-            
-            return downloaded_file, video_info
-    except Exception as e:
-        print(f"Ошибка при загрузке видео: {e}")
-        traceback.print_exc()
+                    percent = int(float(d['_percent_str'].replace('%', '').strip()))
+                    callback(5 + int(percent * 0.3), f"Загрузка видео: {percent}%")
+                except:
+                    pass
+            elif d['status'] == 'finished':
+                callback(35, "Загрузка завершена, извлечение аудио...")
+        
         if status_callback:
-            status_callback(0, f"Ошибка при загрузке видео: {str(e)}")
-        return None, None
+            status_callback(5, "Получение информации о видео...")
+        
+        # Загружаем видео
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
+                # Получаем информацию о видео
+                info = ydl.extract_info(url, download=True)
+                
+                # Ищем сконвертированный WAV файл
+                wav_file = temp_file + '.wav'
+                if not os.path.exists(wav_file):
+                    # Если WAV не найден, ищем другие аудиофайлы
+                    for ext in ['.mp3', '.m4a', '.opus']:
+                        if os.path.exists(temp_file + ext):
+                            wav_file = temp_file + ext
+                            break
+                
+                if not os.path.exists(wav_file):
+                    raise Exception("Не удалось найти загруженный аудиофайл")
+                
+                if status_callback:
+                    status_callback(40, "Аудио успешно извлечено")
+                
+                # Возвращаем путь к файлу и информацию о видео
+                return wav_file, {
+                    'title': info.get('title', 'Неизвестное видео'),
+                    'uploader': info.get('uploader', 'Неизвестный автор'),
+                    'duration': info.get('duration', 0),
+                    'description': info.get('description', ''),
+                    'upload_date': info.get('upload_date', ''),
+                }
+                
+            except Exception as e:
+                if status_callback:
+                    status_callback(0, f"Ошибка при загрузке видео: {str(e)}")
+                raise Exception(f"Ошибка при загрузке видео: {str(e)}")
+    
+    except Exception as e:
+        if status_callback:
+            status_callback(0, f"Ошибка: {str(e)}")
+        raise Exception(f"Ошибка при загрузке видео: {str(e)}")
+
 
 def create_docx(transcript, filename="transcript", with_timestamps=False, video_info=None):
     """Создание DOCX файла с транскрипцией."""
@@ -602,8 +643,6 @@ def create_docx(transcript, filename="transcript", with_timestamps=False, video_
             speaker_run = paragraph.add_run(f"{segment['speaker']}: ")
             speaker_run.font.bold = True
             speaker_run.font.color.rgb = RGBColor(0, 0, 150)
-            
-            # Добавление текста
             text_run = paragraph.add_run(segment['text'])
             text_run.font.size = Pt(11)
             
@@ -623,10 +662,13 @@ def create_docx(transcript, filename="transcript", with_timestamps=False, video_
     footer_run.font.italic = True
     
     # Сохранение во временный файл
-    temp_file = os.path.join(tempfile.gettempdir(), 'transcripts', f"{filename}.docx")
+    temp_dir = os.path.join(tempfile.gettempdir(), 'transcripts')
+    os.makedirs(temp_dir, exist_ok=True)
+    temp_file = os.path.join(temp_dir, f"{filename}.docx")
     doc.save(temp_file)
     
     return temp_file
+
 
 def save_transcript_to_session(session_id, transcript, docx_path, with_timestamps=False, video_info=None, language_code='ru-RU'):
     """Сохранение транскрипции в сессию с информацией о языке"""
@@ -652,9 +694,18 @@ def save_transcript_to_session(session_id, transcript, docx_path, with_timestamp
             sessions_to_delete.append(s_id)
     
     for s_id in sessions_to_delete:
+        # Также удаляем соответствующие DOCX файлы
+        if 'docx_path' in sessions[s_id]:
+            docx_file = os.path.join(tempfile.gettempdir(), 'transcripts', sessions[s_id]['docx_path'])
+            try:
+                if os.path.exists(docx_file):
+                    os.remove(docx_file)
+            except Exception as e:
+                print(f"Ошибка при удалении устаревшего DOCX файла: {e}")
         del sessions[s_id]
     
     return share_url
+
 
 def analyze_transcript(transcript, with_timestamps=False):
     """Расширенный анализ транскрипции с дополнительными метриками"""
@@ -797,12 +848,11 @@ def analyze_transcript(transcript, with_timestamps=False):
             # Определение языка транскрипции
             language = "unknown"
             try:
-                from langdetect import detect
                 # Объединяем весь текст для более точного определения
                 full_text = " ".join([segment['text'] for segment in transcript])
                 if full_text.strip():
                     language = detect(full_text)
-            except (ImportError, Exception) as e:
+            except (ImportError, LangDetectException, Exception) as e:
                 print(f"Не удалось определить язык: {e}")
             
             # Формируем результат
@@ -853,10 +903,9 @@ def analyze_transcript(transcript, with_timestamps=False):
             # Определение языка транскрипции
             language = "unknown"
             try:
-                from langdetect import detect
                 if transcript.strip():
                     language = detect(transcript)
-            except (ImportError, Exception) as e:
+            except (ImportError, LangDetectException, Exception) as e:
                 print(f"Не удалось определить язык: {e}")
             
             # Формируем результат
@@ -879,6 +928,7 @@ def analyze_transcript(transcript, with_timestamps=False):
             'message': f'Ошибка при анализе: {str(e)}'
         }
 
+
 def check_transcription_quality(transcript):
     """
     Проверка качества транскрипции
@@ -898,13 +948,20 @@ def check_transcription_quality(transcript):
             return "Слишком короткая транскрипция"
         
         return "Транскрипция выглядит корректной"
+    elif isinstance(transcript, str):
+        words = transcript.split()
+        if len(words) < 10:
+            return "Слишком короткая транскрипция"
+        return "Транскрипция выглядит корректной"
     
     return "Нет данных для анализа"
+
 
 # Определение маршрутов веб-приложения
 @app.route('/')
 def index():
     return render_template('index.html')
+
 
 @app.route('/share/<session_id>')
 def shared_transcript(session_id):
@@ -921,12 +978,14 @@ def shared_transcript(session_id):
         )
     return render_template('error.html', message="Сессия не найдена или истекла")
 
+
 @app.route('/task_status/<task_id>', methods=['GET'])
 def get_task_status(task_id):
     """Получение статуса задачи по ID"""
     if task_id in task_status:
         return jsonify(task_status[task_id])
     return jsonify({'status': 'unknown', 'percent': 0, 'message': 'Задача не найдена'})
+
 
 def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-RU'):
     """Обработка аудиофайла в отдельном потоке"""
@@ -954,7 +1013,8 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
         session_id = generate_session_id()
         
         # Создание DOCX файла
-        docx_path = create_docx(transcript, os.path.splitext(os.path.basename(file_path))[0], with_timestamps=enable_timestamps)
+        filename = os.path.splitext(os.path.basename(file_path))[0]
+        docx_path = create_docx(transcript, filename, with_timestamps=enable_timestamps)
         
         # Сохраняем транскрипцию в сессию
         share_url = save_transcript_to_session(
@@ -977,6 +1037,14 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
             'share_url': share_url,
             'language': language_code
         }
+        
+        # Удаляем исходный аудиофайл, если транскрипция успешно завершена
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            print(f"Ошибка при удалении исходного аудиофайла: {e}")
+            
     except Exception as e:
         print(f"Ошибка при обработке файла: {e}")
         traceback.print_exc()
@@ -986,6 +1054,7 @@ def process_audio_file(file_path, enable_timestamps, task_id, language_code='ru-
             'percent': 0,
             'message': f'Ошибка: {str(e)}'
         }
+        
         
 def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU'):
     """Обработка ссылки на YouTube в отдельном потоке с использованием Whisper"""
@@ -1038,7 +1107,8 @@ def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU')
         
         # Удаление временного файла
         try:
-            os.remove(audio_path)
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
         except Exception as e:
             print(f"Ошибка при удалении временного файла: {e}")
         
@@ -1064,6 +1134,7 @@ def process_youtube_link(url, enable_timestamps, task_id, language_code='ru-RU')
             'percent': 0,
             'message': f'Ошибка: {str(e)}'
         }
+
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -1095,8 +1166,11 @@ def upload_file():
         }
         
         # Запускаем обработку в отдельном потоке, передавая язык
-        threading.Thread(target=process_audio_file, 
-                         args=(file_path, enable_timestamps, task_id, language_code)).start()
+        threading.Thread(
+            target=process_audio_file, 
+            args=(file_path, enable_timestamps, task_id, language_code),
+            daemon=True
+        ).start()
         
         # Возвращаем ID задачи клиенту
         return jsonify({
@@ -1104,6 +1178,7 @@ def upload_file():
         })
     
     return jsonify({'error': 'Формат файла не поддерживается'}), 400
+
 
 @app.route('/record', methods=['POST'])
 def process_recording():
@@ -1134,13 +1209,17 @@ def process_recording():
     }
     
     # Запускаем обработку в отдельном потоке, передавая язык
-    threading.Thread(target=process_audio_file, 
-                     args=(file_path, enable_timestamps, task_id, language_code)).start()
+    threading.Thread(
+        target=process_audio_file, 
+        args=(file_path, enable_timestamps, task_id, language_code),
+        daemon=True
+    ).start()
     
     # Возвращаем ID задачи клиенту
     return jsonify({
         'task_id': task_id
     })
+
 
 @app.route('/link', methods=['POST'])
 def process_link():
@@ -1166,13 +1245,17 @@ def process_link():
     }
     
     # Запускаем обработку в отдельном потоке, передавая язык
-    threading.Thread(target=process_youtube_link, 
-                    args=(url, enable_timestamps, task_id, language_code)).start()
+    threading.Thread(
+        target=process_youtube_link, 
+        args=(url, enable_timestamps, task_id, language_code),
+        daemon=True
+    ).start()
     
     # Возвращаем ID задачи клиенту
     return jsonify({
         'task_id': task_id
     })
+
 
 @app.route('/download/<filename>', methods=['GET'])
 def download_file(filename):
@@ -1187,6 +1270,7 @@ def download_file(filename):
         as_attachment=True,
         download_name=filename
     )
+
 
 @app.route('/api/verify_link', methods=['POST'])
 def verify_link():
@@ -1216,6 +1300,7 @@ def verify_link():
             'message': f'Ошибка при проверке ссылки: {str(e)}'
         })
 
+
 @app.route('/api/analyze', methods=['POST'])
 def analyze_transcript_api():
     """API для анализа транскрипции"""
@@ -1242,6 +1327,126 @@ def analyze_transcript_api():
             'status': 'error',
             'message': f'Ошибка при анализе: {str(e)}'
         }), 500
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Проверка работоспособности сервиса"""
+    return jsonify({
+        'status': 'healthy',
+        'version': '1.0.0',
+        'timestamp': datetime.datetime.now().isoformat(),
+        'whisper_service': app.config['WHISPER_SERVICE_URL']
+    })
+
+
+@app.route('/transcribe_youtube', methods=['POST'])
+def transcribe_youtube():
+    """Транскрибирование аудио из YouTube видео"""
+    try:
+        data = request.get_json()
+        if not data or 'url' not in data:
+            return jsonify({'error': 'URL не указан'}), 400
+        
+        url = data['url']
+        language = data.get('language', 'ru-RU')
+        timestamps = data.get('timestamps', False)
+        
+        # Генерируем ID задачи
+        task_id = generate_task_id()
+        task_status[task_id] = {
+            'status': 'processing',
+            'progress': 0,
+            'message': 'Подготовка к загрузке видео...'
+        }
+        
+        def update_status(percent, message):
+            if task_id in task_status:
+                task_status[task_id]['progress'] = percent
+                task_status[task_id]['message'] = message
+        
+        # Запускаем загрузку и транскрипцию в отдельном потоке
+        def process_video():
+            try:
+                # Загружаем видео
+                audio_file, video_info = download_from_youtube(url, update_status)
+                
+                if not audio_file or not os.path.exists(audio_file):
+                    raise Exception("Не удалось загрузить аудио из видео")
+                
+                # Подготавливаем аудио для транскрипции
+                prepared_file = prepare_audio_for_transcription(audio_file, update_status)
+                
+                # Отправляем файл на транскрипцию
+                with open(prepared_file, 'rb') as f:
+                    files = {'file': (os.path.basename(prepared_file), f, 'audio/wav')}
+                    data = {
+                        'language': language,
+                        'timestamps': str(timestamps).lower()
+                    }
+                    
+                    response = requests.post(
+                        f"{app.config['WHISPER_SERVICE_URL']}/transcribe",
+                        files=files,
+                        data=data
+                    )
+                    
+                    if response.status_code != 200:
+                        raise Exception(f"Ошибка API: {response.text}")
+                    
+                    result = response.json()
+                    task_id = result.get('task_id')
+                    
+                    # Ждем завершения транскрипции
+                    while True:
+                        status_response = requests.get(
+                            f"{app.config['WHISPER_SERVICE_URL']}/status/{task_id}"
+                        )
+                        status_data = status_response.json()
+                        
+                        if status_data['status'] == 'completed':
+                            task_status[task_id]['status'] = 'completed'
+                            task_status[task_id]['progress'] = 100
+                            task_status[task_id]['message'] = 'Транскрипция завершена'
+                            task_status[task_id]['result'] = status_data['result']
+                            break
+                        elif status_data['status'] == 'error':
+                            raise Exception(f"Ошибка транскрипции: {status_data.get('message', 'Неизвестная ошибка')}")
+                        
+                        time.sleep(1)
+                
+            except Exception as e:
+                task_status[task_id]['status'] = 'error'
+                task_status[task_id]['message'] = str(e)
+                print(f"Ошибка при обработке видео: {e}")
+                traceback.print_exc()
+            finally:
+                # Очищаем временные файлы
+                try:
+                    if 'audio_file' in locals() and os.path.exists(audio_file):
+                        os.remove(audio_file)
+                    if 'prepared_file' in locals() and os.path.exists(prepared_file):
+                        os.remove(prepared_file)
+                except Exception as e:
+                    print(f"Ошибка при очистке временных файлов: {e}")
+        
+        # Запускаем обработку в отдельном потоке
+        thread = threading.Thread(target=process_video)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            'task_id': task_id,
+            'message': 'Задача запущена',
+            'video_info': {
+                'title': 'Загрузка информации...',
+                'duration': 0
+            }
+        })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

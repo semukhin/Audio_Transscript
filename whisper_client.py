@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # URL сервиса Whisper API
-WHISPER_SERVICE_URL = os.environ.get('WHISPER_SERVICE_URL', 'http://whisper:5001')
+WHISPER_SERVICE_URL = os.environ.get('WHISPER_SERVICE_URL', 'http://127.0.0.1:5001')
 
 def transcribe_with_whisper_api(
     file_path: str, 

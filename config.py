@@ -30,9 +30,6 @@ class ProductionConfig(Config):
     # В production используйте переменные окружения
     SECRET_KEY = os.environ.get('SECRET_KEY')
     
-    # Настройки HTTPS
-    SSL_CERTIFICATE = os.environ.get('SSL_CERTIFICATE')
-    SSL_KEY = os.environ.get('SSL_KEY')
 
 # Выбор конфигурации в зависимости от окружения
 config = {

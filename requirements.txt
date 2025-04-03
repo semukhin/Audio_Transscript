@@ -18,3 +18,4 @@ huggingface_hub>=0.16.4
 pyannote.audio>=3.0.0
 openai-whisper
 uvicorn==0.25.0
+accelerate>=0.26.0
